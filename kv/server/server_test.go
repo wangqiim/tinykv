@@ -101,7 +101,7 @@ func TestRawPut1(t *testing.T) {
 	}
 
 	_, err := server.RawPut(nil, req)
-
+	assert.Nil(t, err)
 	got, err := Get(s, cf, []byte{99})
 	assert.Nil(t, err)
 	assert.Equal(t, []byte{42}, got)
