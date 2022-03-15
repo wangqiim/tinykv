@@ -108,7 +108,8 @@ type Progress struct {
 }
 
 type Raft struct {
-	id uint64
+	conf *Config
+	id   uint64
 
 	Term uint64
 	Vote uint64
@@ -166,6 +167,7 @@ func newRaft(c *Config) *Raft {
 	}
 	// Your Code Here (2A).
 	r := Raft{
+		conf:             c,
 		id:               c.ID,
 		Term:             0,
 		Vote:             ValidId,
@@ -216,28 +218,19 @@ func (r *Raft) tick() {
 	case StateFollower:
 		r.electionElapsed++
 		if r.electionElapsed >= r.electionTimeout { // vote request
-			r.becomeCandidate()
-			for peerId := range r.Prs {
-				r.sendrequestVote(peerId)
-			}
-			r.electionElapsed = 0
+			r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgHup})
+			r.resetElectionTimer()
 		}
 	case StateCandidate:
 		r.electionElapsed++
 		if r.electionElapsed >= r.electionTimeout { // vote request
-			r.becomeCandidate()
-			for peerId := range r.Prs {
-				r.sendrequestVote(peerId)
-			}
-			r.electionElapsed = 0
+			r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgHup})
+			r.resetElectionTimer()
 		}
 	case StateLeader:
 		r.heartbeatElapsed++
 		if r.heartbeatElapsed >= r.heartbeatTimeout { // broadcast
-			for peerId := range r.Prs {
-				r.sendHeartbeat(peerId)
-			}
-			r.heartbeatElapsed = 0
+			r.triggerbroadcast()
 		}
 	}
 }
@@ -246,12 +239,10 @@ func (r *Raft) tick() {
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
 	raft_assert(r.Term <= term)
+	r.resetElectionTimer()
 	r.Term = term
 	r.Vote = lead
 	r.Lead = lead
-	for peerId := range r.votes {
-		r.votes[peerId] = false
-	}
 	r.State = StateFollower
 }
 
@@ -269,6 +260,7 @@ func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// todo(wq): NOTE: Leader should propose a noop entry on its term
 	raft_assert(r.State == StateCandidate)
+	r.clearVotes() // call this function when "after start to election" & "success election"
 	r.State = StateLeader
 	r.Lead = r.id
 }
@@ -277,42 +269,67 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	var err error = nil
 	switch r.State {
 	case StateFollower:
 		switch m.MsgType {
 		case pb.MessageType_MsgAppend:
-			if m.Term < r.Term {
-				return ErrMsgTermTooLow
-			} else if m.Term > r.Term {
-				r.becomeFollower(m.Term, m.From)
-			}
+			r.progressMsgAppend(&m)
+		case pb.MessageType_MsgHeartbeat:
+			r.progressMsgHeartbeat(&m)
+		case pb.MessageType_MsgHeartbeatResponse:
+			r.progressMsgHeartbeatResp(&m)
+		case pb.MessageType_MsgHup:
+			r.progressMsgHup(&m)
+		case pb.MessageType_MsgRequestVote:
+			r.progressMsgRequestVote(&m)
+		case pb.MessageType_MsgRequestVoteResponse:
+			r.progressRequestVoteResp(&m)
+		case pb.MessageType_MsgBeat: // ignore
 		default:
-			return ErrNotEmplement
+			err = ErrNotEmplement
 		}
 	case StateCandidate:
 		switch m.MsgType {
 		case pb.MessageType_MsgAppend:
-			if m.Term < r.Term {
-				return ErrMsgTermTooLow
-			} else if m.Term > r.Term {
-				r.becomeFollower(m.Term, m.From)
-			}
+			r.progressMsgAppend(&m)
+		case pb.MessageType_MsgHeartbeat:
+			r.progressMsgHeartbeat(&m)
+		case pb.MessageType_MsgHeartbeatResponse:
+			r.progressMsgHeartbeatResp(&m)
+		case pb.MessageType_MsgHup:
+			r.progressMsgHup(&m)
+		case pb.MessageType_MsgRequestVoteResponse:
+			r.progressRequestVoteResp(&m)
+		case pb.MessageType_MsgRequestVote:
+			r.progressMsgRequestVote(&m)
+		case pb.MessageType_MsgBeat: // ignore
 		default:
-			return ErrNotEmplement
+			err = ErrNotEmplement
 		}
 	case StateLeader:
 		switch m.MsgType {
 		case pb.MessageType_MsgAppend:
-			if m.Term < r.Term {
-				return ErrMsgTermTooLow
-			} else if m.Term > r.Term {
-				r.becomeFollower(m.Term, m.From)
-			}
+			r.progressMsgAppend(&m)
+		case pb.MessageType_MsgHeartbeat:
+			r.progressMsgHeartbeat(&m)
+		case pb.MessageType_MsgHeartbeatResponse:
+			r.progressMsgHeartbeatResp(&m)
+		case pb.MessageType_MsgRequestVoteResponse:
+			r.progressRequestVoteResp(&m)
+		case pb.MessageType_MsgRequestVote:
+			r.progressMsgRequestVote(&m)
+		case pb.MessageType_MsgPropose:
+			r.progressMsgPropose(&m)
+		case pb.MessageType_MsgBeat:
+			r.triggerbroadcast()
+		case pb.MessageType_MsgHup: // ignore
 		default:
-			return ErrNotEmplement
+			err = ErrNotEmplement
 		}
 	}
-	return nil
+	raft_assert(err == nil)
+	return err
 }
 
 // handleAppendEntries handle AppendEntries RPC request

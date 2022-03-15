@@ -1,0 +1,2 @@
+1. new Leader should propose a noop entry on its term. (cause(maybe): 6.824 raft paper figure 8)
+2. new Leader should directly broadcast when election success. (cause(maybe): frequently change leader)
