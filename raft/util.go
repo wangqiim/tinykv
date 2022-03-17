@@ -127,3 +127,13 @@ func IsResponseMsg(msgt pb.MessageType) bool {
 func isHardStateEqual(a, b pb.HardState) bool {
 	return a.Term == b.Term && a.Vote == b.Vote && a.Commit == b.Commit
 }
+
+// voteResponseType maps vote and prevote message types to their corresponding responses.
+func voteRespMsgType(msgt pb.MessageType) pb.MessageType {
+	switch msgt {
+	case pb.MessageType_MsgRequestVote:
+		return pb.MessageType_MsgRequestVoteResponse
+	default:
+		panic(fmt.Sprintf("not a vote message: %s", msgt))
+	}
+}
