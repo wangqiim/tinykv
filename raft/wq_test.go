@@ -47,6 +47,15 @@ func TestSimpleStorage(t *testing.T) {
 	assert.Equal(t, uint64(4), s.lastIndex())
 }
 
+func TestSimpleStorageFirstLast(t *testing.T) {
+	tt := []pb.Entry{{Term: 2, Index: 1}}
+	storage := NewMemoryStorage()
+	storage.Append(tt)
+	ents, err := storage.Entries(storage.firstIndex(), storage.lastIndex()+1) // storage.Entries接口 左闭右开
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(ents))
+}
+
 func TestSimplelog(t *testing.T) {
 	s := NewMemoryStorage()
 	raftLog := newLog(s)

@@ -70,7 +70,7 @@ func newLog(storage Storage) *RaftLog {
 		committed:       None,
 		applied:         None,
 		stabled:         None,
-		entries:         make([]pb.Entry, 1),
+		entries:         make([]pb.Entry, 0),
 		pendingSnapshot: nil, // todo(wq)
 	}
 	firstIndex, err := storage.FirstIndex()
@@ -85,6 +85,14 @@ func newLog(storage Storage) *RaftLog {
 	// Initialize our committed and applied pointers to the time of the last compaction.
 	raftLog.committed = firstIndex - 1 // 0
 	raftLog.applied = firstIndex - 1   // 0
+	storage_ents, err := storage.Entries(firstIndex, lastIndex+1)
+	if err == nil {
+		raftLog.entries = append(raftLog.entries, storage_ents...)
+	} else if err != nil {
+		if err != ErrUnavailable {
+			panic(err)
+		}
+	}
 	return raftLog
 }
 
@@ -102,19 +110,19 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A)
-	return l.entries[l.stabled+1:]
+	return l.entries[l.stabled:]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return l.entries[l.applied+1 : l.committed+1]
+	return l.entries[l.applied:l.committed]
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return uint64(len(l.entries) - 1)
+	return uint64(len(l.entries))
 }
 
 func (l *RaftLog) LastTerm() uint64 {
@@ -126,31 +134,47 @@ func (l *RaftLog) LastTerm() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
+	if i == 0 {
+		return 0, nil
+	}
 	if i > l.LastIndex() {
 		return None, ErrUnavailable
 	}
-	return l.entries[i].GetTerm(), nil
+	return l.entries[i-1].GetTerm(), nil
 }
 
 func (l *RaftLog) append(ents ...pb.Entry) uint64 {
-	if len(ents) == 0 {
-		return l.LastIndex()
-	}
+	raft_assert(len(ents) != 0)
 	// todo(wq): deal with conflict
 
-	offset := ents[0].Index - l.entries[0].Index
-
 	switch {
-	case uint64(len(l.entries)) > offset:
-		l.entries = append([]pb.Entry{}, l.entries[:offset]...)
-		l.entries = append(l.entries, ents...)
-	case uint64(len(l.entries)) == offset:
+	case l.LastIndex() > ents[0].Index-1:
+		// check 当前log和ents的重叠区域，找到冲突点, 如果没有，则直接返回
+		// 因为这个可能是一个老的包，或者说只有ents的部分需要重写当前的log
+		conflictIndex := None
+		conflict_i := 0
+		for i := range ents {
+			term, err := l.Term(ents[i].Index)
+			if err != nil || term != ents[i].Term { // err是因为entry数组out of bound
+				conflictIndex = ents[i].Index
+				conflict_i = i
+				break
+			}
+		}
+		if conflictIndex != None {
+			if l.stabled > conflictIndex-1 {
+				l.stabled = conflictIndex - 1 // storage 上的东西先不更新，应该是由上层来做
+			}
+			l.entries = append([]pb.Entry{}, l.Entries(1, conflictIndex)...)
+			l.entries = append(l.entries, ents[conflict_i:]...)
+		}
+	case l.LastIndex() == ents[0].Index-1:
 		l.entries = append(l.entries, ents...)
 	default:
 		log.Panicf("missing log entry [last: %d, append at: %d]",
 			l.LastIndex(), ents[0].Index)
 	}
-	return l.LastIndex()
+	return ents[len(ents)-1].Index
 }
 
 func (l *RaftLog) isUpToDate(index uint64, term uint64) bool {
@@ -170,4 +194,18 @@ func (l *RaftLog) isUpToDate(index uint64, term uint64) bool {
 	} else {
 		return l.LastIndex() <= index
 	}
+}
+
+func (l *RaftLog) arrayIndex(index uint64) uint64 {
+	// log index begin with 1, but array index begin with 0
+	return index - 1
+}
+
+// 左闭右开
+func (l *RaftLog) Entries(lo, hi uint64) []pb.Entry {
+	raft_assert(lo <= hi)
+	raft_assert(len(l.entries) != 0)
+	raft_assert(lo >= l.entries[0].Index)
+	raft_assert(hi <= l.LastIndex()+1)
+	return l.entries[lo-1 : hi-1]
 }

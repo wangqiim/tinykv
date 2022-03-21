@@ -97,7 +97,8 @@ func (r *Raft) send(m pb.Message) {
 		m.From = r.id
 	}
 	if m.MsgType == pb.MessageType_MsgRequestVote || m.MsgType == pb.MessageType_MsgRequestVoteResponse ||
-		m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgAppendResponse {
+		m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgAppendResponse ||
+		m.MsgType == pb.MessageType_MsgHeartbeat || m.MsgType == pb.MessageType_MsgHeartbeatResponse {
 		if m.Term == 0 {
 			panic(fmt.Sprintf("term should be set when sending %s", m.MsgType))
 		}
@@ -158,6 +159,7 @@ func stepLeader(r *Raft, m pb.Message) error {
 		if !r.appendEntry(ents...) {
 			return ErrProposalDropped
 		}
+		r.maybeUpdateCommit()
 		r.bcastAppend()
 		return nil
 	}
@@ -172,11 +174,22 @@ func stepLeader(r *Raft, m pb.Message) error {
 			if m.Index+1 > r.Prs[m.From].Next {
 				r.Prs[m.From].Next = m.Index + 1
 			}
-			r.maybeUpdateCommit()
+			if r.maybeUpdateCommit() {
+				r.bcastAppend()
+			}
 		} else {
 			if m.Index > r.Prs[m.From].Match && m.Index < r.Prs[m.From].Next {
 				r.Prs[m.From].Next = m.Index
 			}
+			r.sendAppend(m.From)
+		}
+	case pb.MessageType_MsgHeartbeatResponse:
+		raft_assert(!m.Reject) // 不会被拒绝，只会被忽略
+		if m.Index == r.RaftLog.LastIndex() && m.Term == r.RaftLog.LastTerm() {
+			// 收到心跳表示对方的log和leader至少一样新，则忽略
+		} else { // 此时考虑对方比leader的日志还新,但是因为每个leader要提交一个空op，因此该情况不会出现
+			log.Infof("[wq] %x has received %x %s, need to update followers logs", r.id, m.From, m.MsgType)
+			r.sendAppend(m.From)
 		}
 	default:
 		log.Infof("[wq] %x has received %s, but do nothing(maybe need be emplemented)", r.id, m.MsgType)
@@ -219,8 +232,13 @@ func stepFollower(r *Raft, m pb.Message) error {
 	case pb.MessageType_MsgAppend:
 		r.becomeFollower(m.Term, m.From)
 		r.handleAppendEntries(m)
+	case pb.MessageType_MsgHeartbeat:
+		raft_assert((r.Vote == m.From || r.Vote == None))
+		r.becomeFollower(m.Term, m.From)
+		r.handleHeartbeat(m)
+
 	default:
-		log.Infof("[wq] %x has received %s, but do nothing(maybe need be emplemented)", r.id, m.MsgType)
+		log.Infof("[wq] %x has received %s from %x, but do nothing(maybe need be emplemented)", r.id, m.MsgType, m.From)
 	}
 	return nil
 }
@@ -273,8 +291,11 @@ func (r *Raft) appendEntry(es ...pb.Entry) (accepted bool) {
 	return true
 }
 
-func (r *Raft) maybeUpdateCommit() {
+// 按理说leader是没每次受到appendresp更新
+// 但是考虑只有一个节点的情况，因此，再每次propose之后日志落盘之前，也要调用该函数更新
+func (r *Raft) maybeUpdateCommit() bool {
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
+	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
 
 	var matchs []uint64
 	{
@@ -284,7 +305,14 @@ func (r *Raft) maybeUpdateCommit() {
 		}
 		sort.Slice(matchs, func(i, j int) bool { return matchs[i] > matchs[j] })
 	}
-	if matchs[len(matchs)/2] > r.RaftLog.committed {
-		r.RaftLog.committed = matchs[len(matchs)/2]
+	majorityMatch := matchs[len(matchs)/2]
+	term, err := r.RaftLog.Term(majorityMatch)
+
+	raft_assert(err == nil)
+	if majorityMatch > r.RaftLog.committed && term == r.Term {
+		// raft paper: Figure 8 : only commit current log
+		r.RaftLog.committed = majorityMatch
+		return true
 	}
+	return false
 }

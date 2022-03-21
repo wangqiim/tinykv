@@ -197,7 +197,11 @@ func newRaft(c *Config) *Raft {
 		// Next:  (initialized to leade last log index + 1)
 		r.Prs[peerId] = &Progress{Match: 0, Next: raftlog.LastIndex() + 1}
 	}
-	r.becomeFollower(r.Term, None)
+
+	hardState, _, _ := raftlog.storage.InitialState()
+	r.Term = hardState.Term
+	r.Vote = hardState.Vote
+	r.RaftLog.committed = hardState.Commit
 
 	log.Infof("[wq] newRaft %x [term: %d]", r.id, r.Term)
 	return &r
@@ -213,9 +217,9 @@ func (r *Raft) sendAppend(to uint64) bool {
 	term, errt := r.RaftLog.Term(pr.Next - 1)
 	raft_assert(errt == nil)
 
-	ents := r.RaftLog.entries[pr.Next:]
-	m.Index = pr.Next - 1 // prevLogIndex
-	m.LogTerm = term      // prevLogTerm
+	ents := r.RaftLog.Entries(pr.Next, r.RaftLog.LastIndex()+1) // 左闭右开
+	m.Index = pr.Next - 1                                       // prevLogIndex
+	m.LogTerm = term                                            // prevLogTerm
 
 	m.Commit = r.RaftLog.committed
 	m.Term = r.Term
@@ -223,6 +227,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 	for i := 0; i < len(ents); i++ {
 		m.Entries[i] = &ents[i]
 	}
+	log.Infof("[wq] %x send append to %x, commit %d, prevLogIndex %d, prevLogTerm %d",
+		r.id, m.To, m.Commit, m.Index, m.LogTerm)
 	r.send(m)
 	return true
 }
@@ -230,7 +236,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
-	r.msgs = append(r.msgs, pb.Message{
+	r.send(pb.Message{
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
@@ -345,14 +351,6 @@ func (r *Raft) Step(m pb.Message) (err error) {
 				r.id, r.Vote, m.MsgType, m.From, r.Term)
 			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: voteRespMsgType(m.MsgType), Reject: true})
 		}
-	case pb.MessageType_MsgHeartbeat: // todo(wq): 目前不会回复心跳包
-		acceptHeartBeat := (r.Vote == m.From || r.Vote == None) && r.RaftLog.isUpToDate(m.Index, m.LogTerm)
-		if acceptHeartBeat {
-			r.electionElapsed = 0
-			r.Vote = m.From
-		} else {
-			log.Infof("%x rejected %s from %x at term %d, but don't reply", r.id, m.MsgType, m.From, r.Term)
-		}
 	default:
 		switch r.State {
 		case StateLeader:
@@ -380,11 +378,21 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			for i := range ents {
 				ents[i] = *m.Entries[i]
 			}
-			lastIndex := r.RaftLog.append(ents...)
-			if m.Commit > r.RaftLog.committed {
-				r.RaftLog.committed = m.Commit
+			lastIndex := m.Index
+			if len(ents) != 0 {
+				// TestHandleMessageType_MsgAppend2AB()
+				lastIndex = r.RaftLog.append(ents...)
 			}
-			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgAppendResponse, Index: lastIndex, Reject: true})
+			if m.Commit > r.RaftLog.committed {
+				// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
+				// commitIndex = min(leaderCommit, index of last new entry)
+				if m.Commit < lastIndex {
+					r.RaftLog.committed = m.Commit
+				} else {
+					r.RaftLog.committed = lastIndex
+				}
+			}
+			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgAppendResponse, Index: lastIndex, Reject: false})
 		} else {
 			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index, Reject: true})
 		}
@@ -394,6 +402,12 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
+	log.Infof("[wq] %x send %x  %s", r.id, m.From, pb.MessageType_MsgHeartbeatResponse)
+	r.send(pb.Message{
+		From: r.id, To: m.From, Term: r.Term,
+		Index:   r.RaftLog.LastIndex(),
+		LogTerm: r.RaftLog.LastTerm(),
+		MsgType: pb.MessageType_MsgHeartbeatResponse})
 }
 
 // handleSnapshot handle Snapshot RPC request
