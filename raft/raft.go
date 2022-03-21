@@ -171,12 +171,14 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 
+	raftlog := newLog(c.Storage)
+
 	// Your Code Here (2A).
 	r := Raft{
 		id:                        c.ID,
 		Term:                      0,
 		Vote:                      None,
-		RaftLog:                   nil, // todo(wq)
+		RaftLog:                   raftlog,
 		Prs:                       map[uint64]*Progress{},
 		State:                     StateFollower,
 		votes:                     map[uint64]bool{},
@@ -191,7 +193,9 @@ func newRaft(c *Config) *Raft {
 		PendingConfIndex:          0, // todo(wq)
 	}
 	for _, peerId := range c.peers {
-		r.Prs[peerId] = &Progress{Match: None, Next: None}
+		// Match: (initialized to 0, increases monotonically)
+		// Next:  (initialized to leade last log index + 1)
+		r.Prs[peerId] = &Progress{Match: 0, Next: raftlog.LastIndex() + 1}
 	}
 	r.becomeFollower(r.Term, None)
 
@@ -203,7 +207,24 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	return false
+	pr := r.Prs[to]
+	m := pb.Message{From: r.id, To: to, Term: r.Term, MsgType: pb.MessageType_MsgAppend}
+
+	term, errt := r.RaftLog.Term(pr.Next - 1)
+	raft_assert(errt == nil)
+
+	ents := r.RaftLog.entries[pr.Next:]
+	m.Index = pr.Next - 1 // prevLogIndex
+	m.LogTerm = term      // prevLogTerm
+
+	m.Commit = r.RaftLog.committed
+	m.Term = r.Term
+	m.Entries = make([]*pb.Entry, len(ents))
+	for i := 0; i < len(ents); i++ {
+		m.Entries[i] = &ents[i]
+	}
+	r.send(m)
+	return true
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -232,7 +253,7 @@ func (r *Raft) tick() {
 	case StateLeader:
 		r.heartbeatElapsed++
 		if r.heartbeatElapsed >= r.heartbeatTimeout { // hearteat timeout: broadcast
-			r.electionElapsed = 0
+			r.heartbeatElapsed = 0
 			if err := r.Step(pb.Message{From: r.id, MsgType: pb.MessageType_MsgBeat}); err != nil {
 				log.Infof("[wq] error occurred during checking sending heartbeat: %v", err)
 			}
@@ -277,12 +298,11 @@ func (r *Raft) becomeLeader() {
 
 	r.State = StateLeader
 	r.Lead = r.id
-	// emptyEnt := pb.Entry{Data: nil}
-	// // if !r.appendEntry(emptyEnt) {
-	// // 	// This won't happen because we just called reset() above.
-	// // 	log.Panic("empty entry was dropped")
-	// // }
 	log.Infof("[wq] %x became leader at term %d", r.id, r.Term)
+
+	if err := r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: nil}}}); err != nil {
+		log.Panic("[wq] empty entry was dropped")
+	}
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -295,12 +315,10 @@ func (r *Raft) Step(m pb.Message) (err error) {
 	case m.Term > r.Term:
 		log.Infof("[wq] %x [term: %d] received a %s message with higher term from %x [term: %d]",
 			r.id, r.Term, m.MsgType, m.From, m.Term)
-		if m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgHeartbeat { // 不会直接给vote request 投票，因为可能log不是最新的
+		if m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgHeartbeat {
 			r.becomeFollower(m.Term, m.From)
-		} else {
+		} else { // 不会直接给vote request 投票，因为可能log不是最新的
 			r.becomeFollower(m.Term, None)
-			log.Infof("[wq] %x [term: %d] received a %s message with higher term from %x [term: %d]",
-				r.id, r.Term, m.MsgType, m.From, m.Term)
 		}
 
 	case m.Term < r.Term:
@@ -314,17 +332,26 @@ func (r *Raft) Step(m pb.Message) (err error) {
 		r.hup()
 	case pb.MessageType_MsgRequestVote:
 		// We can vote if this is a repeat of a vote we've already cast...
-		canVote := r.Vote == m.From ||
-			// ...we haven't voted and we don't think there's a leader yet in this term...
-			(r.Vote == None && r.Lead == None)
-		if canVote { // && r.raftLog.isUpToDate(m.Index, m.LogTerm) {
-			log.Infof("%x [vote: %x] rejected %s from %x at term %d",
+		canVote := r.Vote == m.From || r.Vote == None
+		canVote = canVote && r.RaftLog.isUpToDate(m.Index, m.LogTerm)
+		if canVote {
+			log.Infof("%x [vote: %x] support %s from %x at term %d",
 				r.id, r.Vote, m.MsgType, m.From, r.Term)
 			r.send(pb.Message{To: m.From, Term: m.Term, MsgType: voteRespMsgType(m.MsgType), Reject: false})
 			r.electionElapsed = 0
 			r.Vote = m.From
 		} else {
+			log.Infof("%x [vote: %x] rejected %s from %x at term %d",
+				r.id, r.Vote, m.MsgType, m.From, r.Term)
 			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: voteRespMsgType(m.MsgType), Reject: true})
+		}
+	case pb.MessageType_MsgHeartbeat: // todo(wq): 目前不会回复心跳包
+		acceptHeartBeat := (r.Vote == m.From || r.Vote == None) && r.RaftLog.isUpToDate(m.Index, m.LogTerm)
+		if acceptHeartBeat {
+			r.electionElapsed = 0
+			r.Vote = m.From
+		} else {
+			log.Infof("%x rejected %s from %x at term %d, but don't reply", r.id, m.MsgType, m.From, r.Term)
 		}
 	default:
 		switch r.State {
@@ -345,6 +372,23 @@ func (r *Raft) Step(m pb.Message) (err error) {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	if term, err := r.RaftLog.Term(m.Index); err != nil {
+		r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index, Reject: true})
+	} else {
+		if term == m.LogTerm { // accept
+			ents := make([]pb.Entry, len(m.Entries))
+			for i := range ents {
+				ents[i] = *m.Entries[i]
+			}
+			lastIndex := r.RaftLog.append(ents...)
+			if m.Commit > r.RaftLog.committed {
+				r.RaftLog.committed = m.Commit
+			}
+			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgAppendResponse, Index: lastIndex, Reject: true})
+		} else {
+			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index, Reject: true})
+		}
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request

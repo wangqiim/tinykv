@@ -96,7 +96,8 @@ func (r *Raft) send(m pb.Message) {
 	if m.From == None {
 		m.From = r.id
 	}
-	if m.MsgType == pb.MessageType_MsgRequestVote || m.MsgType == pb.MessageType_MsgRequestVoteResponse {
+	if m.MsgType == pb.MessageType_MsgRequestVote || m.MsgType == pb.MessageType_MsgRequestVoteResponse ||
+		m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgAppendResponse {
 		if m.Term == 0 {
 			panic(fmt.Sprintf("term should be set when sending %s", m.MsgType))
 		}
@@ -130,7 +131,13 @@ func (r *Raft) hup() {
 		if id == r.id {
 			continue
 		}
-		r.send(pb.Message{Term: r.Term, To: id, MsgType: pb.MessageType_MsgRequestVote})
+		r.send(pb.Message{
+			From:    r.id,
+			Term:    r.Term,
+			To:      id,
+			MsgType: pb.MessageType_MsgRequestVote,
+			Index:   r.RaftLog.LastIndex(),
+			LogTerm: r.RaftLog.LastTerm()})
 	}
 }
 
@@ -140,13 +147,51 @@ func stepLeader(r *Raft, m pb.Message) error {
 	case pb.MessageType_MsgBeat:
 		r.bcastHeartbeat()
 		return nil
+	case pb.MessageType_MsgPropose:
+		if len(m.Entries) == 0 {
+			log.Panicf("%x stepped empty MsgProp", r.id)
+		}
+		ents := make([]pb.Entry, len(m.Entries))
+		for i := range ents {
+			ents[i] = *m.Entries[i]
+		}
+		if !r.appendEntry(ents...) {
+			return ErrProposalDropped
+		}
+		r.bcastAppend()
+		return nil
 	}
 
 	// All other message types require a progress for m.From (pr).
 	switch m.MsgType {
-	//todo
+	case pb.MessageType_MsgAppendResponse:
+		if !m.Reject {
+			if m.Index > r.Prs[m.From].Match {
+				r.Prs[m.From].Match = m.Index
+			}
+			if m.Index+1 > r.Prs[m.From].Next {
+				r.Prs[m.From].Next = m.Index + 1
+			}
+			r.maybeUpdateCommit()
+		} else {
+			if m.Index > r.Prs[m.From].Match && m.Index < r.Prs[m.From].Next {
+				r.Prs[m.From].Next = m.Index
+			}
+		}
+	default:
+		log.Infof("[wq] %x has received %s, but do nothing(maybe need be emplemented)", r.id, m.MsgType)
 	}
 	return nil
+}
+
+// bcastHeartbeat sends RPC, without entries to all the peers.
+func (r *Raft) bcastAppend() {
+	for peerId := range r.Prs {
+		if peerId == r.id {
+			continue
+		}
+		r.sendAppend(peerId)
+	}
 }
 
 func stepCandidate(r *Raft, m pb.Message) error {
@@ -163,6 +208,8 @@ func stepCandidate(r *Raft, m pb.Message) error {
 	case pb.MessageType_MsgAppend:
 		r.becomeFollower(m.Term, m.From)
 		r.handleAppendEntries(m)
+	default:
+		log.Infof("[wq] %x has received %s, but do nothing(maybe need be emplemented)", r.id, m.MsgType)
 	}
 	return nil
 }
@@ -172,6 +219,8 @@ func stepFollower(r *Raft, m pb.Message) error {
 	case pb.MessageType_MsgAppend:
 		r.becomeFollower(m.Term, m.From)
 		r.handleAppendEntries(m)
+	default:
+		log.Infof("[wq] %x has received %s, but do nothing(maybe need be emplemented)", r.id, m.MsgType)
 	}
 	return nil
 }
@@ -209,4 +258,33 @@ func (r *Raft) poll(id uint64, t pb.MessageType, isVote bool) (granted int, reje
 		result = VoteLost
 	}
 	return granted, rejected, result
+}
+
+func (r *Raft) appendEntry(es ...pb.Entry) (accepted bool) {
+	if r.State != StateLeader {
+		return false
+	}
+	li := r.RaftLog.LastIndex()
+	for i := range es {
+		es[i].Term = r.Term
+		es[i].Index = li + 1 + uint64(i)
+	}
+	r.RaftLog.append(es...)
+	return true
+}
+
+func (r *Raft) maybeUpdateCommit() {
+	r.Prs[r.id].Match = r.RaftLog.LastIndex()
+
+	var matchs []uint64
+	{
+		matchs = make([]uint64, 0, len(r.Prs))
+		for id := range r.Prs {
+			matchs = append(matchs, r.Prs[id].Match)
+		}
+		sort.Slice(matchs, func(i, j int) bool { return matchs[i] > matchs[j] })
+	}
+	if matchs[len(matchs)/2] > r.RaftLog.committed {
+		r.RaftLog.committed = matchs[len(matchs)/2]
+	}
 }
