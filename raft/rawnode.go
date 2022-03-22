@@ -71,15 +71,15 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
-	ready *Ready
+	PendingNum int
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
 	node := RawNode{
-		Raft:  newRaft(config),
-		ready: nil,
+		Raft:       newRaft(config),
+		PendingNum: 0,
 	}
 	return &node, nil
 }
@@ -149,9 +149,6 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	if rn.ready != nil {
-		return *rn.ready
-	}
 	old_hardState, _, err := rn.Raft.RaftLog.storage.InitialState()
 	raft_assert(err == nil)
 
@@ -165,13 +162,14 @@ func (rn *RawNode) Ready() Ready {
 		old_hardState.Vote != rn.Raft.Vote {
 		ready.HardState = old_hardState
 	}
+	rn.PendingNum += 1
 	return ready
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return rn.ready != nil
+	return rn.PendingNum != 0
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
@@ -184,6 +182,7 @@ func (rn *RawNode) Advance(rd Ready) {
 	if len(rd.CommittedEntries) != 0 && rd.CommittedEntries[len(rd.CommittedEntries)-1].Index > rn.Raft.RaftLog.applied {
 		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
 	}
+	rn.PendingNum -= 1
 }
 
 // GetProgress return the Progress of this node and its peers, if this
