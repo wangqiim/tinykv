@@ -101,6 +101,13 @@ func (wb *WriteBatch) MustWriteToDB(db *badger.DB) {
 	}
 }
 
+func (wb *WriteBatch) MustSetMeta(key []byte, msg proto.Message) {
+	err := wb.SetMeta(key, msg)
+	if err != nil {
+		panic(err)
+	}
+}
+
 func (wb *WriteBatch) Reset() {
 	wb.entries = wb.entries[:0]
 	wb.size = 0

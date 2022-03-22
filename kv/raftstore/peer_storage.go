@@ -308,6 +308,33 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	// 1. simply save all log entries at raft.Ready.Entries to raftdb and delete any
+	// previously appended log entries which will never be committed. Also, update the peer storage’s
+	// RaftLocalState and save it to raftdb.
+	if len(entries) == 0 {
+		return nil
+	}
+	entFirstIndex := entries[0].Index
+	entLastIndex := entries[len(entries)-1].Index
+	wbFirstIndex, _ := ps.FirstIndex()
+	wbLastIndex, _ := ps.LastIndex()
+	if entLastIndex < wbFirstIndex {
+		return nil
+	}
+	if entFirstIndex <= wbFirstIndex {
+		entries = entries[wbFirstIndex-entFirstIndex+1:]
+	}
+	for _, entry := range entries {
+		raftWB.MustSetMeta(meta.RaftLogKey(ps.region.GetId(), entry.Index), &entry)
+	}
+	// delete any previously appended log entries which will never be committed
+	if entLastIndex < wbLastIndex {
+		for i := entLastIndex + 1; i <= wbLastIndex; i++ {
+			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.GetId(), i))
+		}
+	}
+	ps.raftState.LastIndex = entLastIndex
+	ps.raftState.LastTerm = entries[len(entries)-1].Term
 	return nil
 }
 
@@ -331,6 +358,17 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
+	wb := engine_util.WriteBatch{}
+	// 1. simply save all log entries at raft.Ready.Entries to raftdb and delete any
+	// previously appended log entries which will never be committed. Also, update the peer storage’s
+	// RaftLocalState and save it to raftdb.
+	ps.Append(ready.Entries, &wb)
+	// 2. update peer storage’s RaftLocalState.HardState and save it to raftdb.
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
+	wb.MustSetMeta(meta.RaftStateKey(ps.region.GetId()), ps.raftState)
+	wb.MustWriteToDB(ps.Engines.Raft)
 	return nil, nil
 }
 
