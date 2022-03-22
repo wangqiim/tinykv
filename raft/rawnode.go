@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"fmt"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -70,12 +71,17 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	ready *Ready
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	node := RawNode{
+		Raft:  newRaft(config),
+		ready: nil,
+	}
+	return &node, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,19 +149,41 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	if rn.ready != nil {
+		return *rn.ready
+	}
+	old_hardState, _, err := rn.Raft.RaftLog.storage.InitialState()
+	raft_assert(err == nil)
+
+	ready := Ready{
+		SoftState:        nil,
+		Entries:          rn.Raft.RaftLog.unstableEntries(),
+		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
+	}
+	if old_hardState.Commit != rn.Raft.RaftLog.committed ||
+		old_hardState.Term != rn.Raft.Term ||
+		old_hardState.Vote != rn.Raft.Vote {
+		ready.HardState = old_hardState
+	}
+	return ready
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return false
+	return rn.ready != nil
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	if len(rd.Entries) != 0 && rd.Entries[len(rd.Entries)-1].Index > rn.Raft.RaftLog.stabled {
+		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
+	}
+	if len(rd.CommittedEntries) != 0 && rd.CommittedEntries[len(rd.CommittedEntries)-1].Index > rn.Raft.RaftLog.applied {
+		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this
@@ -173,4 +201,36 @@ func (rn *RawNode) GetProgress() map[uint64]Progress {
 // TransferLeader tries to transfer leadership to the given transferee.
 func (rn *RawNode) TransferLeader(transferee uint64) {
 	_ = rn.Raft.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: transferee})
+}
+
+// 车轮
+type Wheel struct {
+	Size int
+}
+
+// 引擎
+type Engine struct {
+	Power int    // 功率
+	Type  string // 类型
+}
+
+// 车
+type Car struct {
+	Wheel
+	Engine
+}
+
+func test() {
+	c := Car{
+		// 初始化轮子
+		Wheel: Wheel{
+			Size: 18,
+		},
+		// 初始化引擎
+		Engine: Engine{
+			Type:  "1.4T",
+			Power: 143,
+		},
+	}
+	fmt.Printf("%+v\n", c)
 }
