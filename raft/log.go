@@ -144,12 +144,8 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	if i > l.LastIndex() {
 		return None, ErrUnavailable
 	}
-	if i < l.offset {
-		log.Panic("[wq] storage truncate should keep last term??")
-	} else if i == l.offset {
-		lastIndexInStorage, err := l.storage.LastIndex()
-		raft_assert(err == nil)
-		term, err := l.storage.Term(lastIndexInStorage)
+	if i <= l.offset {
+		term, err := l.storage.Term(i)
 		raft_assert(err == nil)
 		return term, err
 	}
@@ -220,5 +216,10 @@ func (l *RaftLog) Entries(lo, hi uint64) []pb.Entry {
 	raft_assert(len(l.entries) != 0)
 	raft_assert(lo >= l.offset)
 	raft_assert(hi <= l.LastIndex()+1)
+	if lo <= l.offset {
+		ents, err := l.storage.Entries(lo, hi)
+		raft_assert(err == nil)
+		return ents
+	}
 	return l.entries[lo-1-l.offset : hi-1-l.offset]
 }

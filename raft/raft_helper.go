@@ -115,8 +115,8 @@ func (r *Raft) hup() {
 		log.Info("[wq] %x ignoring MsgHup because already leader", r.id)
 		return
 	}
-	log.Infof("[wq] %x is starting a new election at term %d", r.id, r.Term)
 	r.becomeCandidate()
+	log.Infof("[wq] %x is starting a new election at term %d", r.id, r.Term)
 	if _, _, result := r.poll(r.id, pb.MessageType_MsgRequestVoteResponse, true); result == VoteWon {
 		r.becomeLeader()
 	}
@@ -177,9 +177,15 @@ func stepLeader(r *Raft, m pb.Message) error {
 			if r.maybeUpdateCommit() {
 				r.bcastAppend()
 			}
+			if r.GetPrIfNeedInit(m.From).Next == 5 {
+				log.Debug("debug")
+			}
 		} else {
 			if m.Index > r.GetPrIfNeedInit(m.From).Match && m.Index < r.GetPrIfNeedInit(m.From).Next {
 				r.GetPrIfNeedInit(m.From).Next = m.Index
+				if r.GetPrIfNeedInit(m.From).Next == 5 {
+					log.Debug("debug")
+				}
 			}
 			r.sendAppend(m.From)
 		}
@@ -188,7 +194,7 @@ func stepLeader(r *Raft, m pb.Message) error {
 		if m.Index == r.RaftLog.LastIndex() && m.Term == r.RaftLog.LastTerm() {
 			// 收到心跳表示对方的log和leader至少一样新，则忽略
 		} else { // 此时考虑对方比leader的日志还新,但是因为每个leader要提交一个空op，因此该情况不会出现
-			log.Infof("[wq] %x has received %x %s, need to update followers logs", r.id, m.From, m.MsgType)
+			// log.Infof("[wq] %x has received %x %s, need to update followers logs", r.id, m.From, m.MsgType)
 			r.sendAppend(m.From)
 		}
 	default:
@@ -211,7 +217,7 @@ func stepCandidate(r *Raft, m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgRequestVoteResponse:
 		gr, rj, res := r.poll(m.From, m.MsgType, !m.Reject)
-		log.Infof("[wq] %x has received %d %s votes and %d vote rejections", r.id, gr, m.MsgType, rj)
+		log.Infof("[wq] %x has received %s, %d grants votes and %d rejections", r.id, m.MsgType, gr, rj)
 		switch res {
 		case VoteWon:
 			r.becomeLeader()
@@ -232,10 +238,10 @@ func stepFollower(r *Raft, m pb.Message) error {
 	case pb.MessageType_MsgAppend:
 		r.Vote = m.From
 		r.Lead = m.From
+		r.electionElapsed = 0
 		// r.becomeFollower(m.Term, m.From)
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgHeartbeat:
-		raft_assert((r.Vote == m.From || r.Vote == None))
 		r.Vote = m.From
 		r.Lead = m.From
 		r.electionElapsed = 0

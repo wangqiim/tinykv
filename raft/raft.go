@@ -421,7 +421,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
-	log.Infof("[wq] %x send %x  %s", r.id, m.From, pb.MessageType_MsgHeartbeatResponse)
+	// log.Infof("[wq] %x send %x  %s", r.id, m.From, pb.MessageType_MsgHeartbeatResponse)
 	r.send(pb.Message{
 		From: r.id, To: m.From, Term: r.Term,
 		Index:   r.RaftLog.LastIndex(),

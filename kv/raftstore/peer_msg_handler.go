@@ -84,6 +84,8 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 	// 1. add write batch
 	for _, req := range msg.Requests {
 		switch req.CmdType {
+		case raft_cmdpb.CmdType_Invalid:
+			panic("[wq] implement me")
 		case raft_cmdpb.CmdType_Get:
 		case raft_cmdpb.CmdType_Put:
 			kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
@@ -96,49 +98,57 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 	}
 	// 2. process proposals
 	var p *proposal = nil
+	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index {
+		d.proposals = d.proposals[1:]
+	}
 	if len(d.proposals) > 0 {
 		p = d.proposals[0]
 		if p.index < entry.Index {
-			log.Infof("[wq] applying entry.index: %x greater than proposals[0].index: %x", entry.Index, p.index)
-			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
-			d.proposals = d.proposals[1:]
+			log.Panicf("[wq] applying entry.index: %x greater than proposals[0].index: %x", entry.Index, p.index)
 		} else if p.index > entry.Index {
 			log.Infof("[wq] applying entry.index: %x smaller than proposals[0].index: %x", entry.Index, p.index)
-			// d.proposals = d.proposals[1:] // don't do this
+			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
 		} else {
-			// need response
-			log.Infof("[wq] %s applying entry.index: %x", d.Tag, entry.Index)
-			resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
-			for _, req := range msg.Requests {
-				switch req.CmdType {
-				case raft_cmdpb.CmdType_Get:
-					value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
-					if err != nil {
-						panic(err)
-					}
-					resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-						CmdType: raft_cmdpb.CmdType_Get,
-						Get:     &raft_cmdpb.GetResponse{Value: value}})
-				case raft_cmdpb.CmdType_Put:
-					resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-						CmdType: raft_cmdpb.CmdType_Put,
-						Put:     &raft_cmdpb.PutResponse{}})
-				case raft_cmdpb.CmdType_Delete:
-					resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-						CmdType: raft_cmdpb.CmdType_Delete,
-						Delete:  &raft_cmdpb.DeleteResponse{}})
-				case raft_cmdpb.CmdType_Snap:
-					resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-						CmdType: raft_cmdpb.CmdType_Snap,
-						Snap: &raft_cmdpb.SnapResponse{
-							Region: d.Region(), // 面向panic样例编程
-						}})
-					p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false) // 只读事务
+			if entry.Term != p.term {
+				log.Infof("[wq] applying entry.index: %x greater than proposals[0].index: %x", entry.Index, p.index)
+				p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
+			} else {
+				if msg.Header == nil {
+					// 由于term也相等，因此这里不可能出现
+					log.Panic("[wangqi] dead code")
 				}
+				resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
+				for _, req := range msg.Requests {
+					switch req.CmdType {
+					case raft_cmdpb.CmdType_Get:
+						value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
+						if err != nil {
+							panic(err)
+						}
+						resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+							CmdType: raft_cmdpb.CmdType_Get,
+							Get:     &raft_cmdpb.GetResponse{Value: value}})
+					case raft_cmdpb.CmdType_Put:
+						resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+							CmdType: raft_cmdpb.CmdType_Put,
+							Put:     &raft_cmdpb.PutResponse{}})
+					case raft_cmdpb.CmdType_Delete:
+						resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+							CmdType: raft_cmdpb.CmdType_Delete,
+							Delete:  &raft_cmdpb.DeleteResponse{}})
+					case raft_cmdpb.CmdType_Snap:
+						resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+							CmdType: raft_cmdpb.CmdType_Snap,
+							Snap: &raft_cmdpb.SnapResponse{
+								Region: d.Region(), // 面向panic样例编程
+							}})
+						p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false) // 只读事务
+					}
+				}
+				p.cb.Done(resp)
 			}
-			p.cb.Done(resp)
-			d.proposals = d.proposals[1:]
 		}
+		d.proposals = d.proposals[1:]
 	}
 }
 
