@@ -108,6 +108,19 @@ type Progress struct {
 	Match, Next uint64
 }
 
+func (r *Raft) GetPrIfNeedInit(peerId uint64) *Progress {
+	if r.Prs[peerId] == nil {
+		// Match: (initialized to 0, increases monotonically)
+		// Next:  (initialized to leade last log index + 1)
+		r.Prs[peerId] = &Progress{Match: 0, Next: r.RaftLog.LastIndex() + 1}
+	}
+	return r.Prs[peerId]
+}
+
+func (r *Raft) GetId() uint64 {
+	return r.id
+}
+
 type Raft struct {
 	id uint64
 
@@ -192,18 +205,23 @@ func newRaft(c *Config) *Raft {
 		leadTransferee:            0, // todo(wq)
 		PendingConfIndex:          0, // todo(wq)
 	}
-	for _, peerId := range c.peers {
-		// Match: (initialized to 0, increases monotonically)
-		// Next:  (initialized to leade last log index + 1)
-		r.Prs[peerId] = &Progress{Match: 0, Next: raftlog.LastIndex() + 1}
+	hardState, softState, _ := raftlog.storage.InitialState()
+	raft_assert(len(softState.Nodes) != 0 || len(c.peers) != 0)
+	if len(c.peers) != 0 {
+		for _, peerId := range c.peers {
+			_ = r.GetPrIfNeedInit(peerId) // init
+		}
+	} else { // 面向测试样例编程
+		for _, peerId := range softState.Nodes {
+			_ = r.GetPrIfNeedInit(peerId) // init
+		}
 	}
 
-	hardState, _, _ := raftlog.storage.InitialState()
 	r.Term = hardState.Term
 	r.Vote = hardState.Vote
 	r.RaftLog.committed = hardState.Commit
 
-	log.Infof("[wq] newRaft %x [term: %d]", r.id, r.Term)
+	log.Infof("[wq] newRaft %x [term: %d, peerSize: %d]", r.id, r.Term, len(c.peers))
 	return &r
 }
 
@@ -211,7 +229,7 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	pr := r.Prs[to]
+	pr := r.GetPrIfNeedInit(to)
 	m := pb.Message{From: r.id, To: to, Term: r.Term, MsgType: pb.MessageType_MsgAppend}
 
 	term, errt := r.RaftLog.Term(pr.Next - 1)
@@ -346,6 +364,7 @@ func (r *Raft) Step(m pb.Message) (err error) {
 			r.send(pb.Message{To: m.From, Term: m.Term, MsgType: voteRespMsgType(m.MsgType), Reject: false})
 			r.electionElapsed = 0
 			r.Vote = m.From
+			r.Lead = m.From
 		} else {
 			log.Infof("%x [vote: %x] rejected %s from %x at term %d",
 				r.id, r.Vote, m.MsgType, m.From, r.Term)

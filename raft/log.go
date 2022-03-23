@@ -55,7 +55,7 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
-	// offset uint64
+	offset uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -85,6 +85,7 @@ func newLog(storage Storage) *RaftLog {
 	// Initialize our committed and applied pointers to the time of the last compaction.
 	raftLog.committed = firstIndex - 1 // 0
 	raftLog.applied = firstIndex - 1   // 0
+	raftLog.offset = firstIndex - 1    // 0
 	storage_ents, err := storage.Entries(firstIndex, lastIndex+1)
 	if err == nil {
 		raftLog.entries = append(raftLog.entries, storage_ents...)
@@ -110,19 +111,22 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A)
-	return l.entries[l.stabled:]
+	if l.stabled-l.offset >= uint64(len(l.entries)) {
+		return []pb.Entry{}
+	}
+	return l.entries[l.stabled-l.offset:]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return l.entries[l.applied:l.committed]
+	return l.entries[l.applied-l.offset : l.committed-l.offset]
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return uint64(len(l.entries))
+	return l.offset + uint64(len(l.entries))
 }
 
 func (l *RaftLog) LastTerm() uint64 {
@@ -140,13 +144,22 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	if i > l.LastIndex() {
 		return None, ErrUnavailable
 	}
-	return l.entries[i-1].GetTerm(), nil
+	if i < l.offset {
+		log.Panic("[wq] storage truncate should keep last term??")
+	} else if i == l.offset {
+		lastIndexInStorage, err := l.storage.LastIndex()
+		raft_assert(err == nil)
+		term, err := l.storage.Term(lastIndexInStorage)
+		raft_assert(err == nil)
+		return term, err
+	}
+	return l.entries[i-1-l.offset].GetTerm(), nil
 }
 
 func (l *RaftLog) append(ents ...pb.Entry) uint64 {
 	raft_assert(len(ents) != 0)
 	// todo(wq): deal with conflict
-
+	raft_assert(l.offset < ents[0].Index)
 	switch {
 	case l.LastIndex() > ents[0].Index-1:
 		// check 当前log和ents的重叠区域，找到冲突点, 如果没有，则直接返回
@@ -165,7 +178,7 @@ func (l *RaftLog) append(ents ...pb.Entry) uint64 {
 			if l.stabled > conflictIndex-1 {
 				l.stabled = conflictIndex - 1 // storage 上的东西先不更新，应该是由上层来做
 			}
-			l.entries = append([]pb.Entry{}, l.Entries(1, conflictIndex)...)
+			l.entries = append([]pb.Entry{}, l.Entries(l.offset+1, conflictIndex)...)
 			l.entries = append(l.entries, ents[conflict_i:]...)
 		}
 	case l.LastIndex() == ents[0].Index-1:
@@ -201,11 +214,11 @@ func (l *RaftLog) arrayIndex(index uint64) uint64 {
 	return index - 1
 }
 
-// 左闭右开
+// 左闭右开, lo, hi 均为log的Index(即从1开始)
 func (l *RaftLog) Entries(lo, hi uint64) []pb.Entry {
-	raft_assert(lo <= hi)
+	// raft_assert(lo <= hi)
 	raft_assert(len(l.entries) != 0)
-	raft_assert(lo >= l.entries[0].Index)
+	raft_assert(lo >= l.offset)
 	raft_assert(hi <= l.LastIndex()+1)
-	return l.entries[lo-1 : hi-1]
+	return l.entries[lo-1-l.offset : hi-1-l.offset]
 }

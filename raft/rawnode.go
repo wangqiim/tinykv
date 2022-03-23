@@ -160,6 +160,7 @@ func (rn *RawNode) Ready() Ready {
 	if !isHardStateEqual(rn.prevHardState, rn.Raft.CurHardState()) {
 		ready.HardState = rn.Raft.CurHardState()
 	}
+	rn.Raft.msgs = nil //fuck
 	return ready
 }
 

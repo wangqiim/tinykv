@@ -168,18 +168,18 @@ func stepLeader(r *Raft, m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgAppendResponse:
 		if !m.Reject {
-			if m.Index > r.Prs[m.From].Match {
-				r.Prs[m.From].Match = m.Index
+			if m.Index > r.GetPrIfNeedInit(m.From).Match {
+				r.GetPrIfNeedInit(m.From).Match = m.Index
 			}
-			if m.Index+1 > r.Prs[m.From].Next {
-				r.Prs[m.From].Next = m.Index + 1
+			if m.Index+1 > r.GetPrIfNeedInit(m.From).Next {
+				r.GetPrIfNeedInit(m.From).Next = m.Index + 1
 			}
 			if r.maybeUpdateCommit() {
 				r.bcastAppend()
 			}
 		} else {
-			if m.Index > r.Prs[m.From].Match && m.Index < r.Prs[m.From].Next {
-				r.Prs[m.From].Next = m.Index
+			if m.Index > r.GetPrIfNeedInit(m.From).Match && m.Index < r.GetPrIfNeedInit(m.From).Next {
+				r.GetPrIfNeedInit(m.From).Next = m.Index
 			}
 			r.sendAppend(m.From)
 		}
@@ -192,7 +192,7 @@ func stepLeader(r *Raft, m pb.Message) error {
 			r.sendAppend(m.From)
 		}
 	default:
-		log.Infof("[wq] %x has received %s, but do nothing(maybe need be emplemented)", r.id, m.MsgType)
+		log.Infof("[wq] %x[state: %v, term: %v] received %s from %x, but do nothing(maybe need be emplemented)", r.id, r.State, r.Term, m.MsgType, m.From)
 	}
 	return nil
 }
@@ -222,7 +222,7 @@ func stepCandidate(r *Raft, m pb.Message) error {
 		r.becomeFollower(m.Term, m.From)
 		r.handleAppendEntries(m)
 	default:
-		log.Infof("[wq] %x has received %s, but do nothing(maybe need be emplemented)", r.id, m.MsgType)
+		log.Infof("[wq] %x[state: %v, term: %v] received %s from %x, but do nothing(maybe need be emplemented)", r.id, r.State, r.Term, m.MsgType, m.From)
 	}
 	return nil
 }
@@ -238,7 +238,7 @@ func stepFollower(r *Raft, m pb.Message) error {
 		r.handleHeartbeat(m)
 
 	default:
-		log.Infof("[wq] %x has received %s from %x, but do nothing(maybe need be emplemented)", r.id, m.MsgType, m.From)
+		log.Infof("[wq] %x[state: %v, term: %v] received %s from %x, but do nothing(maybe need be emplemented)", r.id, r.State, r.Term, m.MsgType, m.From)
 	}
 	return nil
 }
@@ -294,8 +294,8 @@ func (r *Raft) appendEntry(es ...pb.Entry) (accepted bool) {
 // 按理说leader是没每次受到appendresp更新
 // 但是考虑只有一个节点的情况，因此，再每次propose之后日志落盘之前，也要调用该函数更新
 func (r *Raft) maybeUpdateCommit() bool {
-	r.Prs[r.id].Match = r.RaftLog.LastIndex()
-	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
+	r.GetPrIfNeedInit(r.id).Match = r.RaftLog.LastIndex()
+	r.GetPrIfNeedInit(r.id).Next = r.GetPrIfNeedInit(r.id).Match + 1
 
 	var matchs []uint64
 	{

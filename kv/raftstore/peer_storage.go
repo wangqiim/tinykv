@@ -314,15 +314,16 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	if len(entries) == 0 {
 		return nil
 	}
+	// case: entfirst: 6, entlast:6, wbfirst:6, wblast:5
 	entFirstIndex := entries[0].Index
 	entLastIndex := entries[len(entries)-1].Index
 	wbFirstIndex, _ := ps.FirstIndex()
 	wbLastIndex, _ := ps.LastIndex()
-	if entLastIndex < wbFirstIndex {
-		return nil
+	if entFirstIndex < wbFirstIndex {
+		panic("[wq] shouldn't happen (entries overwrite snapshot?)")
 	}
-	if entFirstIndex <= wbFirstIndex {
-		entries = entries[wbFirstIndex-entFirstIndex+1:]
+	if entFirstIndex > wbLastIndex+1 {
+		panic("[wq] shouldn't happen (log empty hole in raftDB?)")
 	}
 	for _, entry := range entries {
 		raftWB.MustSetMeta(meta.RaftLogKey(ps.region.GetId(), entry.Index), &entry)
