@@ -71,15 +71,16 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
-	PendingNum int
+	prevHardState pb.HardState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
+	raft := newRaft(config)
 	node := RawNode{
-		Raft:       newRaft(config),
-		PendingNum: 0,
+		Raft:          raft,
+		prevHardState: raft.CurHardState(),
 	}
 	return &node, nil
 }
@@ -149,40 +150,48 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	old_hardState, _, err := rn.Raft.RaftLog.storage.InitialState()
-	raft_assert(err == nil)
 
 	ready := Ready{
 		SoftState:        nil,
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
+		Messages:         rn.Raft.msgs,
 	}
-	if old_hardState.Commit != rn.Raft.RaftLog.committed ||
-		old_hardState.Term != rn.Raft.Term ||
-		old_hardState.Vote != rn.Raft.Vote {
-		ready.HardState = old_hardState
+	if !isHardStateEqual(rn.prevHardState, rn.Raft.CurHardState()) {
+		ready.HardState = rn.Raft.CurHardState()
 	}
-	rn.PendingNum += 1
 	return ready
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return rn.PendingNum != 0
+	curhardState := rn.Raft.CurHardState()
+	if !IsEmptyHardState(curhardState) &&
+		!isHardStateEqual(curhardState, rn.prevHardState) {
+		return true
+	}
+	// unstabled, send msgs, unapplied
+	if len(rn.Raft.RaftLog.unstableEntries()) > 0 ||
+		len(rn.Raft.msgs) > 0 || len(rn.Raft.RaftLog.nextEnts()) > 0 {
+		return true
+	}
+	return false
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
-	if len(rd.Entries) != 0 && rd.Entries[len(rd.Entries)-1].Index > rn.Raft.RaftLog.stabled {
+	if !IsEmptyHardState(rd.HardState) {
+		rn.prevHardState = rd.HardState
+	}
+	if len(rd.Entries) > 0 {
 		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
 	}
-	if len(rd.CommittedEntries) != 0 && rd.CommittedEntries[len(rd.CommittedEntries)-1].Index > rn.Raft.RaftLog.applied {
+	if len(rd.CommittedEntries) > 0 {
 		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
 	}
-	rn.PendingNum -= 1
 }
 
 // GetProgress return the Progress of this node and its peers, if this

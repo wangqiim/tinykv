@@ -316,3 +316,11 @@ func (r *Raft) maybeUpdateCommit() bool {
 	}
 	return false
 }
+
+func (r *Raft) CurHardState() pb.HardState {
+	return pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
+	}
+}
