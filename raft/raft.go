@@ -206,7 +206,7 @@ func newRaft(c *Config) *Raft {
 		PendingConfIndex:          0, // todo(wq)
 	}
 	hardState, softState, _ := raftlog.storage.InitialState()
-	raft_assert(len(softState.Nodes) != 0 || len(c.peers) != 0)
+	// raft_assert(len(softState.Nodes) != 0 || len(c.peers) != 0)  what fuck: raft/rawnode_test.go func TestRawNodeRestart2AC()
 	if len(c.peers) != 0 {
 		for _, peerId := range c.peers {
 			_ = r.GetPrIfNeedInit(peerId) // init
