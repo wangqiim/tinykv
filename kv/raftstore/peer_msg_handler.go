@@ -99,10 +99,10 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 	if len(d.proposals) > 0 {
 		p = d.proposals[0]
 		if p.index < entry.Index {
-			log.Infof("[wq] applying entry.index: %x smaller than proposals[0].index: %x", entry.Index, p.index)
+			log.Infof("[wq] applying entry.index: %x greater than proposals[0].index: %x", entry.Index, p.index)
 			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
 		} else if p.index > entry.Index {
-			log.Panicf("[wq] applying entry.index: %x greater than proposals[0].index: %x", entry.Index, p.index)
+			log.Panicf("[wq] applying entry.index: %x smaller than proposals[0].index: %x", entry.Index, p.index)
 		} else {
 			// need response
 			log.Infof("[wq] %s applying entry.index: %x", d.Tag, entry.Index)

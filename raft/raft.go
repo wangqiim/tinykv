@@ -211,7 +211,7 @@ func newRaft(c *Config) *Raft {
 		for _, peerId := range c.peers {
 			_ = r.GetPrIfNeedInit(peerId) // init
 		}
-	} else { // 面向测试样例编程
+	} else { //
 		for _, peerId := range softState.Nodes {
 			_ = r.GetPrIfNeedInit(peerId) // init
 		}
@@ -364,7 +364,7 @@ func (r *Raft) Step(m pb.Message) (err error) {
 			r.send(pb.Message{To: m.From, Term: m.Term, MsgType: voteRespMsgType(m.MsgType), Reject: false})
 			r.electionElapsed = 0
 			r.Vote = m.From
-			r.Lead = m.From
+			r.Lead = None // 面向测试样例编程，当收到心跳或者append才更新r.Lead
 		} else {
 			log.Infof("%x [vote: %x] rejected %s from %x at term %d",
 				r.id, r.Vote, m.MsgType, m.From, r.Term)
