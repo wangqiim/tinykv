@@ -245,8 +245,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 	for i := 0; i < len(ents); i++ {
 		m.Entries[i] = &ents[i]
 	}
-	log.Infof("[wq] %x send append to %x, commit %d, prevLogIndex %d, prevLogTerm %d",
-		r.id, m.To, m.Commit, m.Index, m.LogTerm)
+	// log.Infof("[wq] %x send append to %x, commit %d, prevLogIndex %d, prevLogTerm %d",
+	// 	r.id, m.To, m.Commit, m.Index, m.LogTerm)
 	r.send(m)
 	return true
 }

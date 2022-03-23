@@ -87,8 +87,8 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 		case raft_cmdpb.CmdType_Get:
 		case raft_cmdpb.CmdType_Put:
 			kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
-			log.Infof("[wq] [Tag %s] write key %v, value %v",
-				d.Tag, string(req.Put.Key), string(req.Put.Value))
+			// log.Infof("[wq] [Tag %s] write key %v, value %v",
+			// 	d.Tag, string(req.Put.Key), string(req.Put.Value))
 		case raft_cmdpb.CmdType_Delete:
 			kvWB.DeleteCF(req.Delete.Cf, req.Delete.Key)
 		case raft_cmdpb.CmdType_Snap:
@@ -101,8 +101,10 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 		if p.index < entry.Index {
 			log.Infof("[wq] applying entry.index: %x greater than proposals[0].index: %x", entry.Index, p.index)
 			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
+			d.proposals = d.proposals[1:]
 		} else if p.index > entry.Index {
-			log.Panicf("[wq] applying entry.index: %x smaller than proposals[0].index: %x", entry.Index, p.index)
+			log.Infof("[wq] applying entry.index: %x smaller than proposals[0].index: %x", entry.Index, p.index)
+			// d.proposals = d.proposals[1:] // don't do this
 		} else {
 			// need response
 			log.Infof("[wq] %s applying entry.index: %x", d.Tag, entry.Index)
@@ -135,8 +137,8 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 				}
 			}
 			p.cb.Done(resp)
+			d.proposals = d.proposals[1:]
 		}
-		d.proposals = d.proposals[1:]
 	}
 }
 
@@ -208,8 +210,8 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrResp(err))
 		return
 	}
-	log.Infof("[wq] [Tag %s] [leader: %v, Vote: %v Term: %v votes: %v] propose raft command %v",
-		d.Tag, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Vote, d.RaftGroup.Raft.Term, d.nextProposalIndex())
+	// log.Infof("[wq] [Tag %s] [leader: %v, Vote: %v Term: %v] propose raft command %v",
+	// 	d.Tag, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Vote, d.RaftGroup.Raft.Term, d.nextProposalIndex())
 	data, err := msg.Marshal()
 	if err != nil {
 		panic(err)

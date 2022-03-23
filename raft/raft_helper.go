@@ -230,13 +230,17 @@ func stepCandidate(r *Raft, m pb.Message) error {
 func stepFollower(r *Raft, m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgAppend:
-		r.becomeFollower(m.Term, m.From)
+		r.Vote = m.From
+		r.Lead = m.From
+		// r.becomeFollower(m.Term, m.From)
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgHeartbeat:
 		raft_assert((r.Vote == m.From || r.Vote == None))
-		r.becomeFollower(m.Term, m.From)
+		r.Vote = m.From
+		r.Lead = m.From
+		r.electionElapsed = 0
+		// r.becomeFollower(m.Term, m.From)
 		r.handleHeartbeat(m)
-
 	default:
 		log.Infof("[wq] %x[state: %v, term: %v] received %s from %x, but do nothing(maybe need be emplemented)", r.id, r.State, r.Term, m.MsgType, m.From)
 	}
