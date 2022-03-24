@@ -233,7 +233,29 @@ func (r *Raft) sendAppend(to uint64) bool {
 	m := pb.Message{From: r.id, To: to, Term: r.Term, MsgType: pb.MessageType_MsgAppend}
 
 	term, errt := r.RaftLog.Term(pr.Next - 1)
-	raft_assert(errt == nil)
+	if errt == ErrCompacted {
+		errt = nil
+		var snapshot pb.Snapshot
+		if IsEmptySnap(r.RaftLog.pendingSnapshot) {
+			snapshot, errt = r.RaftLog.storage.Snapshot()
+		} else {
+			snapshot = *r.RaftLog.pendingSnapshot
+		}
+		if errt != nil {
+			return false
+		}
+		msg := pb.Message{
+			MsgType:  pb.MessageType_MsgSnapshot,
+			From:     r.id,
+			To:       to,
+			Term:     r.Term,
+			Snapshot: &snapshot,
+		}
+		r.msgs = append(r.msgs, msg)
+		r.GetPrIfNeedInit(to).Next = snapshot.Metadata.Index + 1
+	} else {
+		raft_assert(errt == nil)
+	}
 
 	ents := r.RaftLog.Entries(pr.Next, r.RaftLog.LastIndex()+1) // 左闭右开
 	m.Index = pr.Next - 1                                       // prevLogIndex
@@ -339,7 +361,7 @@ func (r *Raft) Step(m pb.Message) (err error) {
 	case m.Term > r.Term:
 		log.Infof("[wq] %x [term: %d] received a %s message with higher term from %x [term: %d]",
 			r.id, r.Term, m.MsgType, m.From, m.Term)
-		if m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgHeartbeat {
+		if m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgHeartbeat || m.MsgType == pb.MessageType_MsgSnapshot {
 			r.becomeFollower(m.Term, m.From)
 		} else { // 不会直接给vote request 投票，因为可能log不是最新的
 			r.becomeFollower(m.Term, None)
@@ -432,6 +454,24 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	meta := m.Snapshot.Metadata
+	if meta.Index <= r.RaftLog.committed ||
+		meta.Term < r.Term {
+		// panic("[wq] implement me")
+		return
+	}
+	r.RaftLog.applied = meta.Index
+	r.RaftLog.committed = meta.Index
+	r.RaftLog.stabled = meta.Index
+	if len(r.RaftLog.entries) > 0 {
+		if meta.Index > r.RaftLog.LastIndex() {
+			r.RaftLog.entries = nil
+		} else if meta.Index >= r.RaftLog.FirstIndex() {
+			r.RaftLog.entries = r.RaftLog.Entries(meta.Index+1, r.RaftLog.LastIndex()+1)
+		}
+	}
+	r.RaftLog.offset = meta.Index
+	r.RaftLog.pendingSnapshot = m.Snapshot
 }
 
 // addNode add a new node to raft group

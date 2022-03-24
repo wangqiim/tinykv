@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -52,8 +53,12 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	ready := d.RaftGroup.Ready()
 	// 1. save hardstate and append log
 	result, err := d.peerStorage.SaveReadyState(&ready)
-	if err != nil || result != nil {
+	if err != nil {
 		panic("[wq] implement me")
+	}
+	if result != nil && !reflect.DeepEqual(result.PrevRegion, result.Region) {
+		panic("[wq] implement me")
+		// d.peerStorage.SetRegion(result.Region)
 	}
 	// 2. apply ents
 	if len(ready.CommittedEntries) != 0 {
@@ -101,6 +106,25 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index {
 		d.proposals = d.proposals[1:]
 	}
+
+	// process snapshot
+	if msg.AdminRequest != nil {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			if msg.AdminRequest.CompactLog.GetCompactIndex() > d.peerStorage.applyState.TruncatedState.Index {
+				d.peerStorage.applyState.TruncatedState.Index = msg.AdminRequest.CompactLog.GetCompactIndex()
+				d.peerStorage.applyState.TruncatedState.Term = msg.AdminRequest.CompactLog.GetCompactTerm()
+				// 因为快照的truncateindex一定先于applyindex，参考 func onRaftGCLogTick()
+				// 所以延迟applyState落盘(调用 process的函数来做)应该没事,assert防御一下
+				d.ScheduleCompactLog(d.peerStorage.applyState.TruncatedState.Index)
+			}
+		default:
+			panic("[wq] implement me")
+		}
+		return
+	}
+
+	// may process client proposal requests
 	if len(d.proposals) > 0 {
 		p = d.proposals[0]
 		if p.index < entry.Index {

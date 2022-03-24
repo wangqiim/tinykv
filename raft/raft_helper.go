@@ -247,6 +247,11 @@ func stepFollower(r *Raft, m pb.Message) error {
 		r.electionElapsed = 0
 		// r.becomeFollower(m.Term, m.From)
 		r.handleHeartbeat(m)
+	case pb.MessageType_MsgSnapshot:
+		r.Vote = m.From
+		r.Lead = m.From
+		r.electionElapsed = 0
+		r.handleSnapshot(m)
 	default:
 		log.Infof("[wq] %x[state: %v, term: %v] received %s from %x, but do nothing(maybe need be emplemented)", r.id, r.State, r.Term, m.MsgType, m.From)
 	}

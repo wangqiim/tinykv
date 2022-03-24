@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/Connor1996/badger/y"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -106,6 +107,15 @@ func (l *RaftLog) String() string {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	firtIndexInStorage, err := l.storage.FirstIndex()
+	y.Assert(err == nil)
+	if len(l.entries) > 0 {
+		firstIndex := l.entries[0].Index
+		if firtIndexInStorage > firstIndex {
+			l.entries = l.entries[firtIndexInStorage-firstIndex:]
+			l.offset = firtIndexInStorage - 1
+		}
+	}
 }
 
 // unstableEntries return all the unstable entries
@@ -121,6 +131,11 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
 	return l.entries[l.applied-l.offset : l.committed-l.offset]
+}
+
+// LastIndex return the first index of the log entries
+func (l *RaftLog) FirstIndex() uint64 {
+	return l.offset + 1
 }
 
 // LastIndex return the last index of the log entries
@@ -146,7 +161,6 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	}
 	if i <= l.offset {
 		term, err := l.storage.Term(i)
-		raft_assert(err == nil)
 		return term, err
 	}
 	return l.entries[i-1-l.offset].GetTerm(), nil
