@@ -159,7 +159,15 @@ func stepLeader(r *Raft, m pb.Message) error {
 		if !r.appendEntry(ents...) {
 			return ErrProposalDropped
 		}
-		r.maybeUpdateCommit()
+		r.GetPrIfNeedInit(r.id).Match = r.RaftLog.LastIndex()
+		r.GetPrIfNeedInit(r.id).Next = r.GetPrIfNeedInit(r.id).Match + 1
+		if len(r.Prs) == 1 {
+			// 不能任何情况在此时 updatecommit，等到 append的时候才去改commit，
+			// 因为要考虑这么一种情况：该节点后来才成为leader，结果match比较旧，
+			// 此时这一段的日志已经被压缩了，取中位数直接就panic了（拿不到中位数位置log的term)，
+			// 因为要防止paper figure 8B （因此必须取term)
+			r.maybeUpdateCommit()
+		}
 		r.bcastAppend()
 		return nil
 	}
@@ -321,7 +329,7 @@ func (r *Raft) maybeUpdateCommit() bool {
 		sort.Slice(matchs, func(i, j int) bool { return matchs[i] > matchs[j] })
 	}
 	majorityMatch := matchs[len(matchs)/2]
-	term, err := r.RaftLog.Term(majorityMatch)
+	term, err := r.RaftLog.Term(majorityMatch) // panic过
 
 	raft_assert(err == nil)
 	if majorityMatch > r.RaftLog.committed && term == r.Term {

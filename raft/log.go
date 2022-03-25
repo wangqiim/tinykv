@@ -56,7 +56,8 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
-	offset uint64
+	offset     uint64
+	offsetTerm uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -84,9 +85,11 @@ func newLog(storage Storage) *RaftLog {
 	}
 	raftLog.stabled = lastIndex // 0
 	// Initialize our committed and applied pointers to the time of the last compaction.
-	raftLog.committed = firstIndex - 1 // 0
-	raftLog.applied = firstIndex - 1   // 0
-	raftLog.offset = firstIndex - 1    // 0
+	raftLog.committed = firstIndex - 1                     // 0
+	raftLog.applied = firstIndex - 1                       // 0
+	raftLog.offset = firstIndex - 1                        // 0
+	raftLog.offsetTerm, err = storage.Term(raftLog.offset) // 0
+	y.Assert(err == nil)
 	storage_ents, err := storage.Entries(firstIndex, lastIndex+1)
 	if err == nil {
 		raftLog.entries = append(raftLog.entries, storage_ents...)
@@ -114,6 +117,8 @@ func (l *RaftLog) maybeCompact() {
 		if firtIndexInStorage > firstIndex {
 			l.entries = l.entries[firtIndexInStorage-firstIndex:]
 			l.offset = firtIndexInStorage - 1
+			l.offsetTerm, err = l.storage.Term(firtIndexInStorage) // 即使storage里是空的，也会保留一个{index, term}在0位置应该是
+			y.Assert(err == nil)
 		}
 	}
 }
@@ -159,7 +164,10 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	if i > l.LastIndex() {
 		return None, ErrUnavailable
 	}
-	if i <= l.offset {
+	if i == l.offset {
+		y.Assert(l.offsetTerm != None)
+		return l.offsetTerm, nil
+	} else if i < l.offset {
 		term, err := l.storage.Term(i)
 		return term, err
 	}
@@ -190,6 +198,8 @@ func (l *RaftLog) append(ents ...pb.Entry) uint64 {
 			}
 			l.entries = append([]pb.Entry{}, l.Entries(l.offset+1, conflictIndex)...)
 			l.entries = append(l.entries, ents[conflict_i:]...)
+			l.offset = l.entries[0].Index - 1
+			l.offsetTerm = l.entries[0].Term
 		}
 	case l.LastIndex() == ents[0].Index-1:
 		l.entries = append(l.entries, ents...)

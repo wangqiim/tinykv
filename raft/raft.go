@@ -117,6 +117,12 @@ func (r *Raft) GetPrIfNeedInit(peerId uint64) *Progress {
 	return r.Prs[peerId]
 }
 
+func (r *Raft) resetPrs() {
+	for i := range r.Prs {
+		r.Prs[i] = &Progress{Match: 0, Next: r.RaftLog.LastIndex() + 1}
+	}
+}
+
 func (r *Raft) GetId() uint64 {
 	return r.id
 }
@@ -338,6 +344,7 @@ func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// todo(wq): NOTE: Leader should propose a noop entry on its term
 	r.reset(r.Term)
+	r.resetPrs()
 	if r.State == StateFollower {
 		panic("invalid transition [follower -> leader]")
 	}
@@ -471,6 +478,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		}
 	}
 	r.RaftLog.offset = meta.Index
+	r.RaftLog.offsetTerm = meta.Term
 	r.RaftLog.pendingSnapshot = m.Snapshot
 }
 
