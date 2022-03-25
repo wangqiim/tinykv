@@ -239,7 +239,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	m := pb.Message{From: r.id, To: to, Term: r.Term, MsgType: pb.MessageType_MsgAppend}
 
 	term, errt := r.RaftLog.Term(pr.Next - 1)
-	if errt == ErrCompacted {
+	if errt == ErrCompacted || errt == ErrUnavailable {
 		errt = nil
 		var snapshot pb.Snapshot
 		if IsEmptySnap(r.RaftLog.pendingSnapshot) {
@@ -259,6 +259,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 		}
 		r.msgs = append(r.msgs, msg)
 		r.GetPrIfNeedInit(to).Next = snapshot.Metadata.Index + 1
+		return true
 	} else {
 		raft_assert(errt == nil)
 	}
@@ -476,6 +477,9 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		} else if meta.Index >= r.RaftLog.FirstIndex() {
 			r.RaftLog.entries = r.RaftLog.Entries(meta.Index+1, r.RaftLog.LastIndex()+1)
 		}
+	}
+	for _, nodeId := range m.Snapshot.Metadata.ConfState.GetNodes() {
+		r.Prs[nodeId] = &Progress{}
 	}
 	r.RaftLog.offset = meta.Index
 	r.RaftLog.offsetTerm = meta.Term
