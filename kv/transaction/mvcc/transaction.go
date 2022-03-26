@@ -5,6 +5,7 @@ import (
 
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/util/codec"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 	"github.com/pingcap-incubator/tinykv/scheduler/pkg/tsoutil"
 )
@@ -53,6 +54,11 @@ func (txn *MvccTxn) GetLock(key []byte) (*Lock, error) {
 // PutLock adds a key/lock to this transaction.
 func (txn *MvccTxn) PutLock(key []byte, lock *Lock) {
 	// Your Code Here (4A).
+	write := storage.Modify{Data: storage.Put{
+		Key:   key,
+		Value: lock.ToBytes(),
+		Cf:    engine_util.CfLock}}
+	txn.writes = append(txn.writes, write)
 }
 
 // DeleteLock adds a delete lock to this transaction.
