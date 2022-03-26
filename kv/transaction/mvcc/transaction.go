@@ -1,8 +1,10 @@
 package mvcc
 
 import (
+	"bytes"
 	"encoding/binary"
 
+	"github.com/Connor1996/badger/y"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/util/codec"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
@@ -42,51 +44,132 @@ func (txn *MvccTxn) Writes() []storage.Modify {
 // PutWrite records a write at key and ts.
 func (txn *MvccTxn) PutWrite(key []byte, ts uint64, write *Write) {
 	// Your Code Here (4A).
+	y.Assert(ts >= txn.StartTS)
+	single_write := storage.Modify{Data: storage.Put{
+		Key:   EncodeKey(key, ts),
+		Value: write.ToBytes(),
+		Cf:    engine_util.CfWrite}}
+	txn.writes = append(txn.writes, single_write)
 }
 
 // GetLock returns a lock if key is locked. It will return (nil, nil) if there is no lock on key, and (nil, err)
 // if an error occurs during lookup.
 func (txn *MvccTxn) GetLock(key []byte) (*Lock, error) {
 	// Your Code Here (4A).
-	return nil, nil
+	lockBytes, err := txn.Reader.GetCF(engine_util.CfLock, key)
+	if err != nil {
+		return nil, err
+	}
+	if lockBytes == nil {
+		return nil, nil
+	}
+	lock, err := ParseLock(lockBytes)
+	return lock, err
 }
 
 // PutLock adds a key/lock to this transaction.
 func (txn *MvccTxn) PutLock(key []byte, lock *Lock) {
 	// Your Code Here (4A).
-	write := storage.Modify{Data: storage.Put{
+	y.Assert(lock.Ts >= txn.StartTS)
+	single_write := storage.Modify{Data: storage.Put{
 		Key:   key,
 		Value: lock.ToBytes(),
 		Cf:    engine_util.CfLock}}
-	txn.writes = append(txn.writes, write)
+	txn.writes = append(txn.writes, single_write)
 }
 
 // DeleteLock adds a delete lock to this transaction.
 func (txn *MvccTxn) DeleteLock(key []byte) {
 	// Your Code Here (4A).
+	single_write := storage.Modify{Data: storage.Delete{
+		Key: key,
+		Cf:  engine_util.CfLock}}
+	txn.writes = append(txn.writes, single_write)
 }
 
 // GetValue finds the value for key, valid at the start timestamp of this transaction.
 // I.e., the most recent value committed before the start of this transaction.
 func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 	// Your Code Here (4A).
+	// 1. read local txn writes
+	for i := 0; i < len(txn.writes); i++ {
+		single_write := &txn.writes[i]
+		if single_write.Cf() == engine_util.CfDefault && bytes.Equal(single_write.Key(), key) {
+			switch single_write.Data.(type) {
+			case storage.Put:
+				return single_write.Value(), nil
+			case storage.Delete:
+				return nil, nil
+			}
+		}
+	}
+	// 2. read disk
+	// 2.1 get recent comimt write from disk
+	// 2.2 get commit write corresponding value from disk
+	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	iter.Seek(EncodeKey(key, txn.StartTS))
+	if iter.Valid() {
+		item := iter.Item()
+		iterKey := DecodeUserKey(item.Key())
+		if bytes.Equal(key, iterKey) {
+			writeBytes, err := item.ValueCopy(nil) // todo(wq): copy is necessary?
+			y.Assert(err == nil)
+			write, err := ParseWrite(writeBytes)
+			y.Assert(err == nil)
+			if write.Kind == WriteKindDelete {
+				return nil, nil
+			}
+			value, err := txn.Reader.GetCF(engine_util.CfDefault, EncodeKey(key, write.StartTS))
+			y.Assert(err == nil)
+			return value, nil
+		}
+	}
 	return nil, nil
 }
 
 // PutValue adds a key/value write to this transaction.
 func (txn *MvccTxn) PutValue(key []byte, value []byte) {
 	// Your Code Here (4A).
+	single_write := storage.Modify{Data: storage.Put{
+		Key:   EncodeKey(key, txn.StartTS),
+		Value: value,
+		Cf:    engine_util.CfDefault}}
+	txn.writes = append(txn.writes, single_write)
 }
 
 // DeleteValue removes a key/value pair in this transaction.
 func (txn *MvccTxn) DeleteValue(key []byte) {
 	// Your Code Here (4A).
+	single_write := storage.Modify{Data: storage.Delete{
+		Key: EncodeKey(key, txn.StartTS),
+		Cf:  engine_util.CfDefault}}
+	txn.writes = append(txn.writes, single_write)
 }
 
 // CurrentWrite searches for a write with this transaction's start timestamp. It returns a Write from the DB and that
 // write's commit timestamp, or an error.
 func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	// Your Code Here (4A).
+	// 2. read disk
+	// 2.1 get all recent commit with key (assumption: only one write meet requirements)
+	// 2.2 get commit write corresponding value from disk
+	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	for iter.Seek(EncodeKey(key, TsMax)); iter.Valid(); iter.Next() {
+		item := iter.Item()
+		iterKey := DecodeUserKey(item.Key())
+		if bytes.Equal(key, iterKey) {
+			writeBytes, err := item.ValueCopy(nil) // todo(wq): copy is necessary?
+			y.Assert(err == nil)
+			write, err := ParseWrite(writeBytes)
+			y.Assert(err == nil)
+			if write.StartTS == txn.StartTS {
+				commitTimstamp := decodeTimestamp(item.Key())
+				return write, commitTimstamp, nil
+			}
+		} else {
+			break
+		}
+	}
 	return nil, 0, nil
 }
 
@@ -94,6 +177,21 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 // write's commit timestamp, or an error.
 func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	// Your Code Here (4A).
+	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	for iter.Seek(EncodeKey(key, TsMax)); iter.Valid(); iter.Next() {
+		item := iter.Item()
+		iterKey := DecodeUserKey(item.Key())
+		if bytes.Equal(key, iterKey) {
+			writeBytes, err := item.ValueCopy(nil) // todo(wq): copy is necessary?
+			y.Assert(err == nil)
+			write, err := ParseWrite(writeBytes)
+			y.Assert(err == nil)
+			commitTimstamp := decodeTimestamp(item.Key())
+			return write, commitTimstamp, nil
+		} else {
+			break
+		}
+	}
 	return nil, 0, nil
 }
 
