@@ -107,6 +107,7 @@ func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 	// 2.1 get recent comimt write from disk
 	// 2.2 get commit write corresponding value from disk
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
 	iter.Seek(EncodeKey(key, txn.StartTS))
 	if iter.Valid() {
 		item := iter.Item()
@@ -154,6 +155,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	// 2.1 get all recent commit with key (assumption: only one write meet requirements)
 	// 2.2 get commit write corresponding value from disk
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
 	for iter.Seek(EncodeKey(key, TsMax)); iter.Valid(); iter.Next() {
 		item := iter.Item()
 		iterKey := DecodeUserKey(item.Key())
@@ -178,6 +180,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	// Your Code Here (4A).
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
 	for iter.Seek(EncodeKey(key, TsMax)); iter.Valid(); iter.Next() {
 		item := iter.Item()
 		iterKey := DecodeUserKey(item.Key())
