@@ -94,12 +94,13 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 	txn := mvcc.NewMvccTxn(reader, req.GetStartVersion())
 
 	// 1. latch控制[]key防止竞争
-	// keysToLatch := make([][]byte, len(req.Mutations))
-	// for _, mut := range req.GetMutations() {
-	// 	keysToLatch = append(keysToLatch, mut.GetKey())
-	// }
-	// server.Latches.WaitForLatches(keysToLatch)
-
+	keysToLatch := make([][]byte, len(req.Mutations))
+	for _, mut := range req.GetMutations() {
+		keysToLatch = append(keysToLatch, mut.GetKey())
+	}
+	server.Latches.WaitForLatches(keysToLatch)
+	// // 4. 释放[]key latch
+	defer server.Latches.ReleaseLatches(keysToLatch)
 	// 2. 判断有没有write-write冲突，然后检查锁并且上锁，然后写value
 	errors := make([]*kvrpcpb.KeyError, 0)
 	for _, mut := range req.GetMutations() {
@@ -156,8 +157,6 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 	// 3. 将该事务的list刷进磁盘
 	err = server.storage.Write(req.Context, txn.Writes())
 	y.Assert(err == nil)
-	// // 4. 释放[]key latch
-	// server.Latches.ReleaseLatches(keysToLatch)
 	return resp, nil
 }
 
