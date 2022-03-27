@@ -214,7 +214,45 @@ func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnS
 
 func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollbackRequest) (*kvrpcpb.BatchRollbackResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	resp := new(kvrpcpb.BatchRollbackResponse)
+
+	if len(req.Keys) == 0 {
+		return resp, nil
+	}
+	reader, err := server.storage.Reader(req.Context)
+	y.Assert(err == nil)
+	defer reader.Close()
+	txn := mvcc.NewMvccTxn(reader, req.GetStartVersion())
+	// 1. latch控制[]key防止竞争
+	server.Latches.WaitForLatches(req.Keys)
+	defer server.Latches.ReleaseLatches(req.Keys)
+	for _, key := range req.Keys {
+		write, _, err := txn.CurrentWrite(key)
+		y.Assert(err == nil)
+		if write != nil {
+			if write.Kind != mvcc.WriteKindRollback {
+				resp.Error = &kvrpcpb.KeyError{Retryable: "false: this txn has been committed"}
+				return resp, nil
+			} else { // write.Kind == mvcc.WriteKindRollback
+				continue
+			}
+		}
+
+		// 2.1 check key lock
+		lock, err := txn.GetLock(key)
+		y.Assert(err == nil)
+		rollbackWrite := mvcc.Write{StartTS: req.GetStartVersion(), Kind: mvcc.WriteKindRollback}
+		txn.PutWrite(key, req.GetStartVersion(), &rollbackWrite)
+		if lock == nil || lock.Ts != req.GetStartVersion() {
+			continue
+		}
+		txn.DeleteLock(key)
+		txn.DeleteValue(key)
+	}
+	// 3. 将该事务的list刷进磁盘
+	err = server.storage.Write(req.Context, txn.Writes())
+	y.Assert(err == nil)
+	return resp, nil
 }
 
 func (server *Server) KvResolveLock(_ context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
