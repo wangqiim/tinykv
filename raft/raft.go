@@ -489,9 +489,13 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	r.GetPrIfNeedInit(id)
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	delete(r.Prs, id)
+	// pending commands can become committed when a config change reduces the quorum requirements.
+	r.maybeUpdateCommit()
 }

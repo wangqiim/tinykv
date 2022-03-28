@@ -79,7 +79,11 @@ func (d *peerMsgHandler) HandleRaftReady() {
 // apply entry and maybe trigger call back
 func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	if entry.EntryType == eraftpb.EntryType_EntryConfChange {
-		panic("[wq] implement me")
+		msg := &eraftpb.ConfChange{}
+		err := msg.Unmarshal(entry.Data)
+		y.Assert(err == nil)
+		d.RaftGroup.ApplyConfChange(*msg)
+		return
 	}
 	msg := &raft_cmdpb.RaftCmdRequest{}
 
