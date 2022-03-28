@@ -70,6 +70,7 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	prevSoftState SoftState
 	prevHardState pb.HardState
 }
 
@@ -79,6 +80,7 @@ func NewRawNode(config *Config) (*RawNode, error) {
 	raft := newRaft(config)
 	node := RawNode{
 		Raft:          raft,
+		prevSoftState: *raft.CurSoftState(),
 		prevHardState: raft.CurHardState(),
 	}
 	return &node, nil
@@ -151,13 +153,16 @@ func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
 
 	ready := Ready{
-		SoftState:        nil,
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
 		Messages:         rn.Raft.msgs,
 	}
 	if !isHardStateEqual(rn.prevHardState, rn.Raft.CurHardState()) {
 		ready.HardState = rn.Raft.CurHardState()
+	}
+
+	if *rn.Raft.CurSoftState() != rn.prevSoftState {
+		ready.SoftState = rn.Raft.CurSoftState()
 	}
 	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
 		ready.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
@@ -173,6 +178,10 @@ func (rn *RawNode) HasReady() bool {
 	curhardState := rn.Raft.CurHardState()
 	if !IsEmptyHardState(curhardState) &&
 		!isHardStateEqual(curhardState, rn.prevHardState) {
+		return true
+	}
+	curSoftState := rn.Raft.CurSoftState()
+	if *curSoftState != rn.prevSoftState {
 		return true
 	}
 	// unstabled, send msgs, unapplied
@@ -192,6 +201,9 @@ func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
 	if !IsEmptyHardState(rd.HardState) {
 		rn.prevHardState = rd.HardState
+	}
+	if rd.SoftState != nil {
+		rn.prevSoftState = *rd.SoftState
 	}
 	if len(rd.Entries) > 0 {
 		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index

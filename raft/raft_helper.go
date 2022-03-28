@@ -347,3 +347,10 @@ func (r *Raft) CurHardState() pb.HardState {
 		Commit: r.RaftLog.committed,
 	}
 }
+
+func (r *Raft) CurSoftState() *SoftState {
+	return &SoftState{
+		Lead:      r.Lead,
+		RaftState: r.State,
+	}
+}
