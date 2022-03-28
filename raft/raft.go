@@ -108,15 +108,6 @@ type Progress struct {
 	Match, Next uint64
 }
 
-func (r *Raft) GetPrIfNeedInit(peerId uint64) *Progress {
-	if r.Prs[peerId] == nil {
-		// Match: (initialized to 0, increases monotonically)
-		// Next:  (initialized to leade last log index + 1)
-		r.Prs[peerId] = &Progress{Match: 0, Next: r.RaftLog.LastIndex() + 1}
-	}
-	return r.Prs[peerId]
-}
-
 func (r *Raft) resetPrs() {
 	for i := range r.Prs {
 		r.Prs[i] = &Progress{Match: 0, Next: r.RaftLog.LastIndex() + 1}
@@ -182,6 +173,8 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+
+	Transferee uint64
 }
 
 // newRaft return a raft peer with the given config
@@ -215,11 +208,11 @@ func newRaft(c *Config) *Raft {
 	// raft_assert(len(softState.Nodes) != 0 || len(c.peers) != 0)  what fuck: raft/rawnode_test.go func TestRawNodeRestart2AC()
 	if len(c.peers) != 0 {
 		for _, peerId := range c.peers {
-			_ = r.GetPrIfNeedInit(peerId) // init
+			r.Prs[peerId] = &Progress{Match: 0, Next: r.RaftLog.LastIndex() + 1}
 		}
 	} else { //
 		for _, peerId := range softState.Nodes {
-			_ = r.GetPrIfNeedInit(peerId) // init
+			r.Prs[peerId] = &Progress{Match: 0, Next: r.RaftLog.LastIndex() + 1}
 		}
 	}
 
@@ -235,7 +228,7 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	pr := r.GetPrIfNeedInit(to)
+	pr := r.Prs[to]
 	m := pb.Message{From: r.id, To: to, Term: r.Term, MsgType: pb.MessageType_MsgAppend}
 
 	term, errt := r.RaftLog.Term(pr.Next - 1)
@@ -258,7 +251,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 			Snapshot: &snapshot,
 		}
 		r.msgs = append(r.msgs, msg)
-		r.GetPrIfNeedInit(to).Next = snapshot.Metadata.Index + 1
+		r.Prs[to].Next = snapshot.Metadata.Index + 1
 		return true
 	} else {
 		raft_assert(errt == nil)
@@ -289,6 +282,16 @@ func (r *Raft) sendHeartbeat(to uint64) {
 		Term:    r.Term,
 		MsgType: pb.MessageType_MsgHeartbeat,
 	})
+}
+
+// if the transferee is qualified (or after the current leader’s help)
+// the leader should send a MsgTimeoutNow message to the transferee immediatel
+func (r *Raft) sendTimeoutNow(to uint64) {
+	r.send(pb.Message{
+		From:    r.id,
+		To:      to,
+		Term:    r.Term,
+		MsgType: pb.MessageType_MsgTimeoutNow})
 }
 
 // tick advances the internal logical clock by a single tick.
@@ -343,7 +346,11 @@ func (r *Raft) becomeCandidate() {
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
-	// todo(wq): NOTE: Leader should propose a noop entry on its term
+	// a node that has been removed from the group, if the node also got votes, it would panic as it
+	// transitioned to StateLeader
+	if _, exist := r.Prs[r.id]; !exist {
+		log.Panic("a node that has been removed from the group, but it transitioned to StateLeader")
+	}
 	r.reset(r.Term)
 	r.resetPrs()
 	if r.State == StateFollower {
@@ -489,7 +496,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
-	r.GetPrIfNeedInit(id)
+	r.Prs[id] = &Progress{Match: 0, Next: r.RaftLog.LastIndex() + 1}
 }
 
 // removeNode remove a node from raft group

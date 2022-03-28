@@ -14,6 +14,7 @@ import (
 
 	"math/rand"
 
+	"github.com/Connor1996/badger/y"
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -87,6 +88,7 @@ func (r *Raft) reset(term uint64) {
 
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
+	r.Transferee = None
 	r.resetRandomizedElectionTimeout()
 
 	r.ResetVotes()
@@ -98,7 +100,8 @@ func (r *Raft) send(m pb.Message) {
 	}
 	if m.MsgType == pb.MessageType_MsgRequestVote || m.MsgType == pb.MessageType_MsgRequestVoteResponse ||
 		m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgAppendResponse ||
-		m.MsgType == pb.MessageType_MsgHeartbeat || m.MsgType == pb.MessageType_MsgHeartbeatResponse {
+		m.MsgType == pb.MessageType_MsgHeartbeat || m.MsgType == pb.MessageType_MsgHeartbeatResponse ||
+		m.MsgType == pb.MessageType_MsgTimeoutNow {
 		if m.Term == 0 {
 			panic(fmt.Sprintf("term should be set when sending %s", m.MsgType))
 		}
@@ -149,6 +152,9 @@ func stepLeader(r *Raft, m pb.Message) error {
 		r.bcastHeartbeat()
 		return nil
 	case pb.MessageType_MsgPropose:
+		if r.Transferee != None { // stop accepting new proposals when leader transfer
+			return ErrProposalDropped
+		}
 		if len(m.Entries) == 0 {
 			log.Panicf("%x stepped empty MsgProp", r.id)
 		}
@@ -159,8 +165,8 @@ func stepLeader(r *Raft, m pb.Message) error {
 		if !r.appendEntry(ents...) {
 			return ErrProposalDropped
 		}
-		r.GetPrIfNeedInit(r.id).Match = r.RaftLog.LastIndex()
-		r.GetPrIfNeedInit(r.id).Next = r.GetPrIfNeedInit(r.id).Match + 1
+		r.Prs[r.id].Match = r.RaftLog.LastIndex()
+		r.Prs[r.id].Next = r.Prs[r.id].Match + 1
 		if len(r.Prs) == 1 {
 			// 不能任何情况在此时 updatecommit，等到 append的时候才去改commit，
 			// 因为要考虑这么一种情况：该节点后来才成为leader，结果match比较旧，
@@ -170,28 +176,50 @@ func stepLeader(r *Raft, m pb.Message) error {
 		}
 		r.bcastAppend()
 		return nil
+	case pb.MessageType_MsgTransferLeader:
+		// 0. check valid (TestLeaderTransferToNonExistingNode3A)
+		if _, exist := r.Prs[m.From]; exist == false {
+			return nil
+		}
+		// 1. block propose
+		r.Transferee = m.From
+		// 1. check newLeader's log
+		if r.Prs[r.Transferee].Match != r.RaftLog.LastIndex() {
+			// 2. if newLeader's log is not up-to-date, help it(append)
+			result := r.sendAppend(r.Transferee)
+			y.Assert(result) // snapshot maybe false???
+		} else {
+			// 3. if the transferee is qualified send a MsgTimeoutNow message to the transferee
+			r.sendTimeoutNow(r.Transferee)
+		}
+		return nil
 	}
 
 	// All other message types require a progress for m.From (pr).
 	switch m.MsgType {
 	case pb.MessageType_MsgAppendResponse:
 		if !m.Reject {
-			if m.Index > r.GetPrIfNeedInit(m.From).Match {
-				r.GetPrIfNeedInit(m.From).Match = m.Index
+			if m.Index > r.Prs[m.From].Match {
+				r.Prs[m.From].Match = m.Index
 			}
-			if m.Index+1 > r.GetPrIfNeedInit(m.From).Next {
-				r.GetPrIfNeedInit(m.From).Next = m.Index + 1
+			if m.Index+1 > r.Prs[m.From].Next {
+				r.Prs[m.From].Next = m.Index + 1
 			}
 			if r.maybeUpdateCommit() {
 				r.bcastAppend()
 			}
-			if r.GetPrIfNeedInit(m.From).Next == 5 {
+			if r.Prs[m.From].Next == 5 {
 				log.Debug("debug")
 			}
+			// 在心跳返回中去发transfer是为了防止丢包
+			if r.Transferee == m.From && r.Prs[r.Transferee].Match == r.RaftLog.LastIndex() {
+				// 3. if the transferee is qualified send a MsgTimeoutNow message to the transferee
+				r.sendTimeoutNow(r.Transferee)
+			}
 		} else {
-			if m.Index > r.GetPrIfNeedInit(m.From).Match && m.Index < r.GetPrIfNeedInit(m.From).Next {
-				r.GetPrIfNeedInit(m.From).Next = m.Index
-				if r.GetPrIfNeedInit(m.From).Next == 5 {
+			if m.Index > r.Prs[m.From].Match && m.Index < r.Prs[m.From].Next {
+				r.Prs[m.From].Next = m.Index
+				if r.Prs[m.From].Next == 5 {
 					log.Debug("debug")
 				}
 			}
@@ -200,7 +228,11 @@ func stepLeader(r *Raft, m pb.Message) error {
 	case pb.MessageType_MsgHeartbeatResponse:
 		raft_assert(!m.Reject) // 不会被拒绝，只会被忽略
 		if m.Index == r.RaftLog.LastIndex() && m.Term == r.RaftLog.LastTerm() {
-			// 收到心跳表示对方的log和leader至少一样新，则忽略
+			// 收到心跳表示对方的log和leader至少一样新，则忽略其他操作，只触发transfer
+			if r.Transferee == m.From && r.Prs[r.Transferee].Match == r.RaftLog.LastIndex() {
+				// 3. if the transferee is qualified send a MsgTimeoutNow message to the transferee
+				r.sendTimeoutNow(r.Transferee)
+			}
 		} else { // 此时考虑对方比leader的日志还新,但是因为每个leader要提交一个空op，因此该情况不会出现
 			// log.Infof("[wq] %x has received %x %s, need to update followers logs", r.id, m.From, m.MsgType)
 			r.sendAppend(m.From)
@@ -260,6 +292,23 @@ func stepFollower(r *Raft, m pb.Message) error {
 		r.Lead = m.From
 		r.electionElapsed = 0
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		if r.Lead != None {
+			r.send(pb.Message{
+				From:    r.id,
+				To:      r.Lead,
+				MsgType: pb.MessageType_MsgTransferLeader})
+		}
+	case pb.MessageType_MsgTimeoutNow:
+		// when a MessageType_MsgTimeoutNow arrives at a node that has been removed from the group, nothing happens.
+		if _, exist := r.Prs[r.id]; !exist {
+			break
+		}
+		// after receiving a MsgTimeoutNow message the transferee should start a new election immediately regardless of its election timeout
+		r.electionElapsed = 0
+		if err := r.Step(pb.Message{From: r.id, MsgType: pb.MessageType_MsgHup}); err != nil {
+			log.Infof("[wq] error occurred during hup election: %v", err)
+		}
 	default:
 		log.Infof("[wq] %x[state: %v, term: %v] received %s from %x, but do nothing(maybe need be emplemented)", r.id, r.State, r.Term, m.MsgType, m.From)
 	}
@@ -317,8 +366,11 @@ func (r *Raft) appendEntry(es ...pb.Entry) (accepted bool) {
 // 按理说leader是没每次受到appendresp更新
 // 但是考虑只有一个节点的情况，因此，再每次propose之后日志落盘之前，也要调用该函数更新
 func (r *Raft) maybeUpdateCommit() bool {
-	r.GetPrIfNeedInit(r.id).Match = r.RaftLog.LastIndex()
-	r.GetPrIfNeedInit(r.id).Next = r.GetPrIfNeedInit(r.id).Match + 1
+	if _, exist := r.Prs[r.id]; !exist {
+		return false
+	}
+	r.Prs[r.id].Match = r.RaftLog.LastIndex()
+	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
 
 	var matchs []uint64
 	{
