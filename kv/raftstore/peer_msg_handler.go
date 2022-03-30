@@ -133,11 +133,7 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 			d.removePeerCache(cc.NodeId)
 		}
 		confState := d.RaftGroup.ApplyConfChange(*cc)
-		{
-			d.ctx.storeMeta.Lock()
-			defer d.ctx.storeMeta.Unlock()
-			d.ctx.storeMeta.setRegion(d.Region(), d.peer)
-		}
+		log.Infof("[wq] %s applyconfchange %s, len(node) = %d", d.Tag, cc.ChangeType.String(), len(confState.Nodes))
 		_ = confState // useless
 		resp := &raft_cmdpb.RaftCmdResponse{
 			Header: &raft_cmdpb.RaftResponseHeader{},
@@ -188,7 +184,7 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 			case raft_cmdpb.CmdType_Get:
 				value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
 				if err != nil {
-					panic(err)
+					log.Warnf("[wq] get no key! err= %s", err.Error())
 				}
 				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
 					CmdType: raft_cmdpb.CmdType_Get,

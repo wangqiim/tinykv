@@ -17,6 +17,7 @@ package raft
 import (
 	"errors"
 
+	"github.com/Connor1996/badger/y"
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -241,8 +242,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 			snapshot = *r.RaftLog.pendingSnapshot
 		}
 		if errt != nil {
+			// log.Infof("[wq] raftId: %d, find %d need snapshot, but don't ready", r.id, to)
+			y.Assert(errt == ErrSnapshotTemporarilyUnavailable)
 			return false
 		}
+		// log.Infof("[wq] raftId: %d, find %d need snapshot, ready...Go!!!!", r.id, to)
 		msg := pb.Message{
 			MsgType:  pb.MessageType_MsgSnapshot,
 			From:     r.id,

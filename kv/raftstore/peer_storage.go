@@ -381,6 +381,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	}
 	success := <-ch
 	if !success {
+		log.Panic("[wq] apply snapshot fail")
 		return nil, nil
 	}
 	return result, nil
