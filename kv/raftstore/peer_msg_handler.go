@@ -66,23 +66,26 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: result.Region})
 		// d.peerStorage.SetRegion(result.Region)
 	}
-	// 2. apply ents
+	// 2. send msg
+	if len(ready.Messages) != 0 {
+		d.Send(d.ctx.trans, ready.Messages)
+	}
+	// 3. apply ents
 	if len(ready.CommittedEntries) != 0 {
 		kvWB := new(engine_util.WriteBatch)
 		for _, entry := range ready.CommittedEntries {
 			d.process(&entry, kvWB)
+			if d.stopped { // 防止连续两条 remove itself
+				kvWB.DeleteMeta(meta.ApplyStateKey(d.regionId)) // 测试样例测出来的
+				kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
+				break
+			}
 		}
-		if d.stopped {
-			kvWB.DeleteMeta(meta.ApplyStateKey(d.regionId))
-			kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
-		} else {
+		if !d.stopped {
 			d.peerStorage.applyState.AppliedIndex = ready.CommittedEntries[len(ready.CommittedEntries)-1].Index
 			kvWB.MustSetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 			kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
 		}
-	}
-	if len(ready.Messages) != 0 {
-		d.Send(d.ctx.trans, ready.Messages)
 	}
 	d.RaftGroup.Advance(ready)
 }
@@ -98,27 +101,27 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 		y.Assert(err == nil)
 		switch cc.ChangeType {
 		case eraftpb.ConfChangeType_AddNode:
-			log.Infof("[wq] Node %s, add: %d Region.ConfVer: %d", d.Tag, req.Peer.GetId(), d.Region().RegionEpoch.ConfVer)
 			if regionContainPeer(d.Region(), req.Peer.GetId()) {
-				log.Info("[wq] ignore addNode, Region.ConfVer: %v", d.Region().RegionEpoch.ConfVer)
+				// log.Infof("[wq] ignore addNode, Region.ConfVer: %v", d.Region().RegionEpoch.ConfVer)
 				return
 			}
 			d.Region().RegionEpoch.ConfVer++
+			log.Infof("[wq] Node %s, add: %d Region.ConfVer: %d", d.Tag, req.Peer.GetId(), d.Region().RegionEpoch.ConfVer)
 			d.Region().Peers = append(d.Region().Peers, &metapb.Peer{Id: req.Peer.GetId(), StoreId: req.Peer.GetStoreId()})
 			meta.WriteRegionState(kvWB, d.Region(), raft_serverpb.PeerState_Normal)
 		case eraftpb.ConfChangeType_RemoveNode:
-			log.Infof("[wq] Node %s, remove: %d Region.ConfVer: %d", d.Tag, req.Peer.GetId(), d.Region().RegionEpoch.ConfVer)
 			if !regionContainPeer(d.Region(), req.Peer.GetId()) {
-				log.Infof("[wq] ignore removeNode, Region.ConfVer: %v", d.Region().RegionEpoch.ConfVer)
+				// log.Infof("[wq] ignore removeNode, Region.ConfVer: %v", d.Region().RegionEpoch.ConfVer)
 				return
 			}
 			if req.Peer.GetId() == d.PeerId() {
-				log.Infof("[wq] apply remove self Node %s, Region.ConfVer: %d", d.Tag, d.Region().RegionEpoch.ConfVer)
+				log.Infof("[wq] apply remove self Node %s, Region: %s", d.Tag, d.Region().String())
 				d.destroyPeer()
 				kvWB.DeleteMeta(meta.RegionStateKey(req.Peer.GetId()))
 				return
 			}
 			d.Region().RegionEpoch.ConfVer++
+			log.Infof("[wq] Node %s, remove: %d Region.ConfVer: %d", d.Tag, req.Peer.GetId(), d.Region().RegionEpoch.ConfVer)
 			for i, peer := range d.Region().Peers {
 				if peer.Id == req.Peer.GetId() {
 					d.Region().Peers = append(d.Region().Peers[:i], d.Region().Peers[i+1:]...)
@@ -127,7 +130,7 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 			}
 			meta.WriteRegionState(kvWB, d.Region(), raft_serverpb.PeerState_Normal)
 			// y.Assert(cc.NodeId == req.Peer.GetId())
-			// d.removePeerCache(cc.NodeId)
+			d.removePeerCache(cc.NodeId)
 		}
 		confState := d.RaftGroup.ApplyConfChange(*cc)
 		{
@@ -324,9 +327,9 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
 		d.proposals = append(d.proposals, p)
 
-		log.Infof("[wq] raftId: %d propose msg: %s", d.RaftGroup.Raft.GetId(), msg.String()) // maybe drop propose, because transferring or has been not leader
+		// log.Infof("[wq] raftId: %d propose msg: %s", d.RaftGroup.Raft.GetId(), msg.String()) // maybe drop propose, because transferring or has been not leader
 		if err = d.RaftGroup.Propose(data); err != nil {
-			log.Infof("[wq] propose err: %s, msg: %s", err.Error(), msg.String()) // maybe drop propose, because transferring or has been not leader
+			// log.Infof("[wq] propose err: %s, msg: %s", err.Error(), msg.String()) // maybe drop propose, because transferring or has been not leader
 		}
 	}
 }
