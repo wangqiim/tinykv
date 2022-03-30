@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/Connor1996/badger"
 	"github.com/Connor1996/badger/y"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
@@ -16,6 +17,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
 	"github.com/pingcap-incubator/tinykv/scheduler/pkg/btree"
 	"github.com/pingcap/errors"
@@ -57,7 +59,11 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		panic("[wq] implement me")
 	}
 	if result != nil && !reflect.DeepEqual(result.PrevRegion, result.Region) {
-		panic("[wq] implement me")
+		d.ctx.storeMeta.Lock()
+		defer d.ctx.storeMeta.Unlock()
+		d.ctx.storeMeta.setRegion(result.Region, d.peer)
+		d.ctx.storeMeta.regionRanges.Delete(&regionItem{region: result.PrevRegion})
+		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: result.Region})
 		// d.peerStorage.SetRegion(result.Region)
 	}
 	// 2. apply ents
@@ -66,9 +72,14 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		for _, entry := range ready.CommittedEntries {
 			d.process(&entry, kvWB)
 		}
-		d.peerStorage.applyState.AppliedIndex = ready.CommittedEntries[len(ready.CommittedEntries)-1].Index
-		kvWB.MustSetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-		kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
+		if d.stopped {
+			kvWB.DeleteMeta(meta.ApplyStateKey(d.regionId))
+			kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
+		} else {
+			d.peerStorage.applyState.AppliedIndex = ready.CommittedEntries[len(ready.CommittedEntries)-1].Index
+			kvWB.MustSetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+			kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
+		}
 	}
 	if len(ready.Messages) != 0 {
 		d.Send(d.ctx.trans, ready.Messages)
@@ -79,39 +90,73 @@ func (d *peerMsgHandler) HandleRaftReady() {
 // apply entry and maybe trigger call back
 func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	if entry.EntryType == eraftpb.EntryType_EntryConfChange {
-		msg := &eraftpb.ConfChange{}
-		err := msg.Unmarshal(entry.Data)
+		cc := &eraftpb.ConfChange{}
+		err := cc.Unmarshal(entry.Data)
 		y.Assert(err == nil)
-		d.RaftGroup.ApplyConfChange(*msg)
+		req := &raft_cmdpb.ChangePeerRequest{}
+		err = req.Unmarshal(cc.Context)
+		y.Assert(err == nil)
+		switch cc.ChangeType {
+		case eraftpb.ConfChangeType_AddNode:
+			log.Infof("[wq] Node %s, add: %d Region.ConfVer: %d", d.Tag, req.Peer.GetId(), d.Region().RegionEpoch.ConfVer)
+			if regionContainPeer(d.Region(), req.Peer.GetId()) {
+				log.Info("[wq] ignore addNode, Region.ConfVer: %v", d.Region().RegionEpoch.ConfVer)
+				return
+			}
+			d.Region().RegionEpoch.ConfVer++
+			d.Region().Peers = append(d.Region().Peers, &metapb.Peer{Id: req.Peer.GetId(), StoreId: req.Peer.GetStoreId()})
+			meta.WriteRegionState(kvWB, d.Region(), raft_serverpb.PeerState_Normal)
+		case eraftpb.ConfChangeType_RemoveNode:
+			log.Infof("[wq] Node %s, remove: %d Region.ConfVer: %d", d.Tag, req.Peer.GetId(), d.Region().RegionEpoch.ConfVer)
+			if !regionContainPeer(d.Region(), req.Peer.GetId()) {
+				log.Infof("[wq] ignore removeNode, Region.ConfVer: %v", d.Region().RegionEpoch.ConfVer)
+				return
+			}
+			if req.Peer.GetId() == d.PeerId() {
+				log.Infof("[wq] apply remove self Node %s, Region.ConfVer: %d", d.Tag, d.Region().RegionEpoch.ConfVer)
+				d.destroyPeer()
+				kvWB.DeleteMeta(meta.RegionStateKey(req.Peer.GetId()))
+				return
+			}
+			d.Region().RegionEpoch.ConfVer++
+			for i, peer := range d.Region().Peers {
+				if peer.Id == req.Peer.GetId() {
+					d.Region().Peers = append(d.Region().Peers[:i], d.Region().Peers[i+1:]...)
+					break
+				}
+			}
+			meta.WriteRegionState(kvWB, d.Region(), raft_serverpb.PeerState_Normal)
+			// y.Assert(cc.NodeId == req.Peer.GetId())
+			// d.removePeerCache(cc.NodeId)
+		}
+		confState := d.RaftGroup.ApplyConfChange(*cc)
+		{
+			d.ctx.storeMeta.Lock()
+			defer d.ctx.storeMeta.Unlock()
+			d.ctx.storeMeta.setRegion(d.Region(), d.peer)
+		}
+		_ = confState // useless
+		resp := &raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{},
+			AdminResponse: &raft_cmdpb.AdminResponse{
+				CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
+				ChangePeer: &raft_cmdpb.ChangePeerResponse{},
+			},
+		}
+		d.processCallback(entry, resp, nil)
 		return
 	}
+
 	msg := &raft_cmdpb.RaftCmdRequest{}
 
 	if err := msg.Unmarshal(entry.Data); err != nil {
 		panic(err)
 	}
-	// 1. add write batch
-	for _, req := range msg.Requests {
-		switch req.CmdType {
-		case raft_cmdpb.CmdType_Invalid:
-			panic("[wq] implement me")
-		case raft_cmdpb.CmdType_Get:
-		case raft_cmdpb.CmdType_Put:
-			kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
-			// log.Infof("[wq] [Tag %s] write key %v, value %v",
-			// 	d.Tag, string(req.Put.Key), string(req.Put.Value))
-		case raft_cmdpb.CmdType_Delete:
-			kvWB.DeleteCF(req.Delete.Cf, req.Delete.Key)
-		case raft_cmdpb.CmdType_Snap:
-		}
-	}
-	// 2. process proposals
-	var p *proposal = nil
-	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index {
-		d.proposals = d.proposals[1:]
-	}
 
-	// process snapshot
+	resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
+	var txn *badger.Txn = nil
+
+	// 1. process AdminRequest
 	if msg.AdminRequest != nil {
 		switch msg.AdminRequest.CmdType {
 		case raft_cmdpb.AdminCmdType_CompactLog:
@@ -122,62 +167,52 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 				// 所以延迟applyState落盘(调用 process的函数来做)应该没事,assert防御一下
 				d.ScheduleCompactLog(d.peerStorage.applyState.TruncatedState.Index)
 			}
+			return
+		case raft_cmdpb.AdminCmdType_TransferLeader:
+			d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
+			resp.AdminResponse = &raft_cmdpb.AdminResponse{
+				CmdType:        raft_cmdpb.AdminCmdType_TransferLeader,
+				TransferLeader: &raft_cmdpb.TransferLeaderResponse{}}
 		default:
 			panic("[wq] implement me")
 		}
-		return
-	}
-
-	// may process client proposal requests
-	if len(d.proposals) > 0 {
-		p = d.proposals[0]
-		if p.index < entry.Index {
-			log.Panicf("[wq] applying entry.index: %x greater than proposals[0].index: %x", entry.Index, p.index)
-		} else if p.index > entry.Index {
-			log.Infof("[wq] applying entry.index: %x smaller than proposals[0].index: %x", entry.Index, p.index)
-			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
-		} else {
-			if entry.Term != p.term {
-				log.Infof("[wq] applying entry.index: %x greater than proposals[0].index: %x", entry.Index, p.index)
-				p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
-			} else {
-				if msg.Header == nil {
-					// 由于term也相等，因此这里不可能出现
-					log.Panic("[wangqi] dead code")
+	} else {
+		// 2. add write batch
+		for _, req := range msg.Requests {
+			switch req.CmdType {
+			case raft_cmdpb.CmdType_Invalid:
+				panic("[wq] implement me")
+			case raft_cmdpb.CmdType_Get:
+				value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
+				if err != nil {
+					panic(err)
 				}
-				resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
-				for _, req := range msg.Requests {
-					switch req.CmdType {
-					case raft_cmdpb.CmdType_Get:
-						value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
-						if err != nil {
-							panic(err)
-						}
-						resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-							CmdType: raft_cmdpb.CmdType_Get,
-							Get:     &raft_cmdpb.GetResponse{Value: value}})
-					case raft_cmdpb.CmdType_Put:
-						resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-							CmdType: raft_cmdpb.CmdType_Put,
-							Put:     &raft_cmdpb.PutResponse{}})
-					case raft_cmdpb.CmdType_Delete:
-						resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-							CmdType: raft_cmdpb.CmdType_Delete,
-							Delete:  &raft_cmdpb.DeleteResponse{}})
-					case raft_cmdpb.CmdType_Snap:
-						resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
-							CmdType: raft_cmdpb.CmdType_Snap,
-							Snap: &raft_cmdpb.SnapResponse{
-								Region: d.Region(), // 面向panic样例编程
-							}})
-						p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false) // 只读事务
-					}
-				}
-				p.cb.Done(resp)
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Get,
+					Get:     &raft_cmdpb.GetResponse{Value: value}})
+			case raft_cmdpb.CmdType_Put:
+				kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+				// log.Infof("[wq] [Tag %s] write key %v, value %v",
+				// 	d.Tag, string(req.Put.Key), string(req.Put.Value))
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Put,
+					Put:     &raft_cmdpb.PutResponse{}})
+			case raft_cmdpb.CmdType_Delete:
+				kvWB.DeleteCF(req.Delete.Cf, req.Delete.Key)
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Delete,
+					Delete:  &raft_cmdpb.DeleteResponse{}})
+			case raft_cmdpb.CmdType_Snap:
+				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
+					CmdType: raft_cmdpb.CmdType_Snap,
+					Snap: &raft_cmdpb.SnapResponse{
+						Region: d.Region(), // 面向panic样例编程
+					}})
+				txn = d.peerStorage.Engines.Kv.NewTransaction(false) // 只读事务
 			}
 		}
-		d.proposals = d.proposals[1:]
 	}
+	d.processCallback(entry, resp, txn)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -250,14 +285,49 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	}
 	// log.Infof("[wq] [Tag %s] [leader: %v, Vote: %v Term: %v] propose raft command %v",
 	// 	d.Tag, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Vote, d.RaftGroup.Raft.Term, d.nextProposalIndex())
-	data, err := msg.Marshal()
-	if err != nil {
-		panic(err)
-	}
-	p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
-	d.proposals = append(d.proposals, p)
-	if err = d.RaftGroup.Propose(data); err != nil {
-		panic(err)
+	if msg.AdminRequest != nil && msg.AdminRequest.ChangePeer != nil {
+		if msg.AdminRequest.ChangePeer.ChangeType == eraftpb.ConfChangeType_RemoveNode &&
+			d.RaftGroup.Raft.Lead == msg.AdminRequest.ChangePeer.Peer.Id {
+			y.Assert(d.RaftGroup.Raft.Lead == d.RaftGroup.Raft.GetId()) // 自己应该是leader
+			// 直接拒绝, 转移leader, 可以一定程度上避免bug https://asktug.com/t/topic/274196
+			for peerId := range d.RaftGroup.Raft.Prs {
+				if peerId != d.RaftGroup.Raft.GetId() {
+					d.RaftGroup.TransferLeader(peerId)
+					break
+				}
+			}
+			cb.Done(&raft_cmdpb.RaftCmdResponse{
+				Header: &raft_cmdpb.RaftResponseHeader{},
+				AdminResponse: &raft_cmdpb.AdminResponse{
+					CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
+					ChangePeer: &raft_cmdpb.ChangePeerResponse{},
+				},
+			})
+			return
+		}
+		ctx, err := msg.AdminRequest.ChangePeer.Marshal()
+		y.Assert(err == nil)
+		cc := eraftpb.ConfChange{
+			ChangeType: msg.AdminRequest.ChangePeer.ChangeType,
+			NodeId:     msg.AdminRequest.ChangePeer.Peer.Id,
+			Context:    ctx}
+		p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+		err = d.RaftGroup.ProposeConfChange(cc)
+		y.Assert(err == nil)
+		log.Infof("[wq] propose ChangePeer %s,  %d", eraftpb.ConfChangeType_name[int32(cc.ChangeType)], cc.NodeId)
+	} else {
+		data, err := msg.Marshal()
+		if err != nil {
+			panic(err)
+		}
+		p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+
+		log.Infof("[wq] raftId: %d propose msg: %s", d.RaftGroup.Raft.GetId(), msg.String()) // maybe drop propose, because transferring or has been not leader
+		if err = d.RaftGroup.Propose(data); err != nil {
+			log.Infof("[wq] propose err: %s, msg: %s", err.Error(), msg.String()) // maybe drop propose, because transferring or has been not leader
+		}
 	}
 }
 
@@ -307,8 +377,8 @@ func (d *peerMsgHandler) ScheduleCompactLog(truncatedIndex uint64) {
 }
 
 func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
-	log.Debugf("%s handle raft message %s from %d to %d",
-		d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
+	// log.Infof("%s handle raft message %s from %d to %d",
+	// 	d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
 	if !d.validateRaftMessage(msg) {
 		return nil
 	}
@@ -420,11 +490,11 @@ func handleStaleMsg(trans Transport, msg *rspb.RaftMessage, curEpoch *metapb.Reg
 	regionID := msg.RegionId
 	fromPeer := msg.FromPeer
 	toPeer := msg.ToPeer
-	msgType := msg.Message.GetMsgType()
+	// msgType := msg.Message.GetMsgType()
 
 	if !needGC {
 		log.Infof("[region %d] raft message %s is stale, current %v ignore it",
-			regionID, msgType, curEpoch)
+			regionID, msg.String(), curEpoch)
 		return
 	}
 	gcMsg := &rspb.RaftMessage{
@@ -715,4 +785,42 @@ func newCompactLogRequest(regionID uint64, peer *metapb.Peer, compactIndex, comp
 		},
 	}
 	return req
+}
+
+func regionContainPeer(region *metapb.Region, peerId uint64) bool {
+	for _, peer := range region.Peers {
+		if peer.Id == peerId {
+			return true
+		}
+	}
+	return false
+}
+
+// 通过entry的index和term来校对是不是需要触发的callback, 同时截断掉stale callback
+func (d *peerMsgHandler) processCallback(entry *eraftpb.Entry, resp *raft_cmdpb.RaftCmdResponse, txn *badger.Txn) {
+	// 1. process proposals
+	var p *proposal = nil
+	for len(d.proposals) > 0 && d.proposals[0].index < entry.Index {
+		d.proposals = d.proposals[1:]
+	}
+	// 2. may process client proposal requests
+	if len(d.proposals) > 0 {
+		p = d.proposals[0]
+		if p.index < entry.Index {
+			log.Panicf("[wq] applying entry.index: %x greater than proposals[0].index: %x", entry.Index, p.index)
+		} else if p.index > entry.Index {
+			log.Infof("[wq] applying entry.index: %x smaller than proposals[0].index: %x", entry.Index, p.index)
+			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
+		} else {
+			if entry.Term != p.term {
+				log.Infof("[wq] applying index: %x, entry.Term: %x is not equal to proposals[0].term: %x",
+					entry.Index, entry.Term, p.term)
+				p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
+			} else {
+				p.cb.Txn = txn // snap read
+				p.cb.Done(resp)
+			}
+		}
+		d.proposals = d.proposals[1:]
+	}
 }

@@ -177,8 +177,12 @@ func stepLeader(r *Raft, m pb.Message) error {
 		r.bcastAppend()
 		return nil
 	case pb.MessageType_MsgTransferLeader:
+		// log.Infof("[wq] raftId: %d, recive MessageType_MsgTransferLeader, transferee : %d", r.id, m.From)
 		// 0. check valid (TestLeaderTransferToNonExistingNode3A)
 		if _, exist := r.Prs[m.From]; exist == false {
+			return nil
+		}
+		if m.From == r.id {
 			return nil
 		}
 		// 1. block propose
@@ -207,9 +211,6 @@ func stepLeader(r *Raft, m pb.Message) error {
 			}
 			if r.maybeUpdateCommit() {
 				r.bcastAppend()
-			}
-			if r.Prs[m.From].Next == 5 {
-				log.Debug("debug")
 			}
 			// 在心跳返回中去发transfer是为了防止丢包
 			if r.Transferee == m.From && r.Prs[r.Transferee].Match == r.RaftLog.LastIndex() {
@@ -295,7 +296,7 @@ func stepFollower(r *Raft, m pb.Message) error {
 	case pb.MessageType_MsgTransferLeader:
 		if r.Lead != None {
 			r.send(pb.Message{
-				From:    r.id,
+				From:    m.From,
 				To:      r.Lead,
 				MsgType: pb.MessageType_MsgTransferLeader})
 		}
@@ -327,9 +328,9 @@ func (r *Raft) bcastHeartbeat() {
 
 func (r *Raft) poll(id uint64, t pb.MessageType, isVote bool) (granted int, rejected int, result VoteResult) {
 	if isVote {
-		log.Infof("%x received %s supportion from %x at term %d", r.id, t, id, r.Term)
+		// log.Infof("%x received %s supportion from %x at term %d", r.id, t, id, r.Term)
 	} else {
-		log.Infof("%x received %s rejection from %x at term %d", r.id, t, id, r.Term)
+		// log.Infof("%x received %s rejection from %x at term %d", r.id, t, id, r.Term)
 	}
 	r.votes[id] = isVote
 	for _, vote := range r.votes {

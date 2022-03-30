@@ -353,10 +353,12 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// Your Code Here (2C).
 	result := &ApplySnapResult{PrevRegion: ps.region, Region: snapData.Region}
 	// call ps.clearMeta and ps.clearExtraData
-	if err := ps.clearMeta(kvWB, raftWB); err != nil {
-		return nil, err
+	if ps.isInitialized() {
+		if err := ps.clearMeta(kvWB, raftWB); err != nil {
+			return nil, err
+		}
+		ps.clearExtraData(snapData.Region)
 	}
-	ps.clearExtraData(snapData.Region)
 	// update peer storage state like raftState and applyState
 	ps.raftState.LastIndex = snapshot.Metadata.Index
 	ps.raftState.LastTerm = snapshot.Metadata.Term

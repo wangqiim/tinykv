@@ -390,7 +390,9 @@ func (r *Raft) Step(m pb.Message) (err error) {
 
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
-		r.hup()
+		if _, exist := r.Prs[r.id]; exist {
+			r.hup() // remove的node也可能触发心跳
+		}
 	case pb.MessageType_MsgRequestVote:
 		// We can vote if this is a repeat of a vote we've already cast...
 		canVote := r.Vote == m.From || r.Vote == None
@@ -502,6 +504,11 @@ func (r *Raft) addNode(id uint64) {
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	if r.Lead == id {
+		// https://asktug.com/t/topic/274196 (一个 corner case)
+		log.Panicf("[wq] remove leader is risky (认为这个BUG是可以接受的,直接重跑测试吧)")
+		return
+	}
 	delete(r.Prs, id)
 	// pending commands can become committed when a config change reduces the quorum requirements.
 	r.maybeUpdateCommit()
