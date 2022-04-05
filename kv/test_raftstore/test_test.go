@@ -194,7 +194,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		clnts[i] = make(chan int, 1)
 	}
 	for i := 0; i < 3; i++ {
-		// log.Printf("Iteration %v\n", i)
+		fmt.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go SpawnClientsAndWait(t, ch_clients, nclients, func(cli int, t *testing.T) {
@@ -204,6 +204,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			}()
 			last := ""
 			for atomic.LoadInt32(&done_clients) == 0 {
+				// time.Sleep(time.Second) // 这里有时候会变得特别慢，这个时候，打开debug日志，发现raft一直也在同步日志，不知道哪里拖慢了整个系统，看tinykv群里的讨论似乎是磁盘速度太慢。
 				if (rand.Int() % 1000) < 500 {
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
@@ -641,7 +642,6 @@ func TestOneSplit3B(t *testing.T) {
 	region := cluster.GetRegion([]byte("k1"))
 	region1 := cluster.GetRegion([]byte("k2"))
 	assert.Equal(t, region.GetId(), region1.GetId())
-
 	cluster.AddFilter(
 		&PartitionFilter{
 			s1: []uint64{1, 2, 3, 4},
@@ -651,6 +651,7 @@ func TestOneSplit3B(t *testing.T) {
 
 	// write some data to trigger split
 	for i := 100; i < 200; i++ {
+		// fmt.Printf("-------put----%d-----\n", i) // 这里有时候会变得特别慢，这个时候，打开debug日志，发现raft一直也在同步日志，不知道哪里拖慢了整个系统
 		cluster.MustPut([]byte(fmt.Sprintf("k%d", i)), []byte(fmt.Sprintf("v%d", i)))
 	}
 

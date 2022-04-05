@@ -135,7 +135,7 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 	} else {
 		// 2. add write batch
 		for _, req := range msg.Requests {
-			if err := util.CheckKeyInRegion(getRequestKey(req), d.Region()); err != nil {
+			if err := checkKey(getRequestKey(req), d.Region()); err != nil {
 				resp.Header.Error = &errorpb.Error{
 					Message:        "Key not in region",
 					KeyNotInRegion: &errorpb.KeyNotInRegion{Key: getRequestKey(req), RegionId: d.regionId},
@@ -166,6 +166,13 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 					CmdType: raft_cmdpb.CmdType_Delete,
 					Delete:  &raft_cmdpb.DeleteResponse{}})
 			case raft_cmdpb.CmdType_Snap:
+				if err := util.CheckRegionEpoch(msg, d.Region(), true); err != nil {
+					resp.Header.Error = &errorpb.Error{
+						Message:       "Epoch Not Match",
+						EpochNotMatch: &errorpb.EpochNotMatch{},
+					}
+					break
+				}
 				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
 					CmdType: raft_cmdpb.CmdType_Snap,
 					Snap: &raft_cmdpb.SnapResponse{
@@ -915,6 +922,16 @@ func (d *peerMsgHandler) processCallback(entry *eraftpb.Entry, resp *raft_cmdpb.
 		}
 		d.proposals = d.proposals[1:]
 	}
+}
+
+func checkKey(key []byte, region *metapb.Region) error {
+	if key != nil {
+		err := util.CheckKeyInRegion(key, region)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func getRequestKey(req *raft_cmdpb.Request) []byte {
