@@ -15,6 +15,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	errorpb "github.com/pingcap-incubator/tinykv/proto/pkg/errorpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -93,56 +94,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 // apply entry and maybe trigger call back
 func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	if entry.EntryType == eraftpb.EntryType_EntryConfChange {
-		cc := &eraftpb.ConfChange{}
-		err := cc.Unmarshal(entry.Data)
-		y.Assert(err == nil)
-		req := &raft_cmdpb.ChangePeerRequest{}
-		err = req.Unmarshal(cc.Context)
-		y.Assert(err == nil)
-		switch cc.ChangeType {
-		case eraftpb.ConfChangeType_AddNode:
-			if regionContainPeer(d.Region(), req.Peer.GetId()) {
-				// log.Infof("[wq] ignore addNode, Region.ConfVer: %v", d.Region().RegionEpoch.ConfVer)
-				return
-			}
-			d.Region().RegionEpoch.ConfVer++
-			log.Infof("[wq] Node %s, add: %d Region.ConfVer: %d", d.Tag, req.Peer.GetId(), d.Region().RegionEpoch.ConfVer)
-			d.Region().Peers = append(d.Region().Peers, &metapb.Peer{Id: req.Peer.GetId(), StoreId: req.Peer.GetStoreId()})
-			meta.WriteRegionState(kvWB, d.Region(), raft_serverpb.PeerState_Normal)
-		case eraftpb.ConfChangeType_RemoveNode:
-			if !regionContainPeer(d.Region(), req.Peer.GetId()) {
-				// log.Infof("[wq] ignore removeNode, Region.ConfVer: %v", d.Region().RegionEpoch.ConfVer)
-				return
-			}
-			if req.Peer.GetId() == d.PeerId() {
-				log.Infof("[wq] apply remove self Node %s, Region: %s", d.Tag, d.Region().String())
-				d.destroyPeer()
-				kvWB.DeleteMeta(meta.RegionStateKey(req.Peer.GetId()))
-				return
-			}
-			d.Region().RegionEpoch.ConfVer++
-			log.Infof("[wq] Node %s, remove: %d Region.ConfVer: %d", d.Tag, req.Peer.GetId(), d.Region().RegionEpoch.ConfVer)
-			for i, peer := range d.Region().Peers {
-				if peer.Id == req.Peer.GetId() {
-					d.Region().Peers = append(d.Region().Peers[:i], d.Region().Peers[i+1:]...)
-					break
-				}
-			}
-			meta.WriteRegionState(kvWB, d.Region(), raft_serverpb.PeerState_Normal)
-			// y.Assert(cc.NodeId == req.Peer.GetId())
-			d.removePeerCache(cc.NodeId)
-		}
-		confState := d.RaftGroup.ApplyConfChange(*cc)
-		log.Infof("[wq] %s applyconfchange %s, nodes = %v", d.Tag, cc.ChangeType.String(), confState.Nodes)
-		_ = confState // useless
-		resp := &raft_cmdpb.RaftCmdResponse{
-			Header: &raft_cmdpb.RaftResponseHeader{},
-			AdminResponse: &raft_cmdpb.AdminResponse{
-				CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
-				ChangePeer: &raft_cmdpb.ChangePeerResponse{},
-			},
-		}
-		d.processCallback(entry, resp, nil)
+		d.processConfChange(entry, kvWB)
 		return
 	}
 
@@ -172,12 +124,24 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 			resp.AdminResponse = &raft_cmdpb.AdminResponse{
 				CmdType:        raft_cmdpb.AdminCmdType_TransferLeader,
 				TransferLeader: &raft_cmdpb.TransferLeaderResponse{}}
+		case raft_cmdpb.AdminCmdType_Split:
+			d.processSplit(msg, kvWB)
+			return
+		case raft_cmdpb.AdminCmdType_ChangePeer:
+			panic("[wq] ChangPeer 请求都是用 ConfChange发出的,不会走到该分支上,除非调整rawnode的接口,但是无法保证后面的测试是否会测这个接口,因此这个时候重构并不安全")
 		default:
 			panic("[wq] implement me")
 		}
 	} else {
 		// 2. add write batch
 		for _, req := range msg.Requests {
+			if err := util.CheckKeyInRegion(getRequestKey(req), d.Region()); err != nil {
+				resp.Header.Error = &errorpb.Error{
+					Message:        "Key not in region",
+					KeyNotInRegion: &errorpb.KeyNotInRegion{Key: getRequestKey(req), RegionId: d.regionId},
+				}
+				break
+			}
 			switch req.CmdType {
 			case raft_cmdpb.CmdType_Invalid:
 				panic("[wq] implement me")
@@ -212,6 +176,106 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 		}
 	}
 	d.processCallback(entry, resp, txn)
+}
+
+// 这个confchange有点弱智，测试样例好像需要单独构造一个和其他命令不同的req，因此单独提出来
+func (d *peerMsgHandler) processConfChange(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	cc := &eraftpb.ConfChange{}
+	err := cc.Unmarshal(entry.Data)
+	y.Assert(err == nil)
+	req := &raft_cmdpb.ChangePeerRequest{}
+	err = req.Unmarshal(cc.Context)
+	y.Assert(err == nil)
+	switch cc.ChangeType {
+	case eraftpb.ConfChangeType_AddNode:
+		if regionContainPeer(d.Region(), req.Peer.GetId()) {
+			// log.Infof("[wq] ignore addNode, Region.ConfVer: %v", d.Region().RegionEpoch.ConfVer)
+			return
+		}
+		d.Region().RegionEpoch.ConfVer++
+		log.Infof("[wq] Node %s, add: %d Region.ConfVer: %d", d.Tag, req.Peer.GetId(), d.Region().RegionEpoch.ConfVer)
+		d.Region().Peers = append(d.Region().Peers, &metapb.Peer{Id: req.Peer.GetId(), StoreId: req.Peer.GetStoreId()})
+		meta.WriteRegionState(kvWB, d.Region(), raft_serverpb.PeerState_Normal)
+	case eraftpb.ConfChangeType_RemoveNode:
+		if !regionContainPeer(d.Region(), req.Peer.GetId()) {
+			// log.Infof("[wq] ignore removeNode, Region.ConfVer: %v", d.Region().RegionEpoch.ConfVer)
+			return
+		}
+		if req.Peer.GetId() == d.PeerId() {
+			log.Infof("[wq] apply remove self Node %s, Region: %s", d.Tag, d.Region().String())
+			d.destroyPeer()
+			kvWB.DeleteMeta(meta.RegionStateKey(req.Peer.GetId()))
+			return
+		}
+		d.Region().RegionEpoch.ConfVer++
+		log.Infof("[wq] Node %s, remove: %d Region.ConfVer: %d", d.Tag, req.Peer.GetId(), d.Region().RegionEpoch.ConfVer)
+		for i, peer := range d.Region().Peers {
+			if peer.Id == req.Peer.GetId() {
+				d.Region().Peers = append(d.Region().Peers[:i], d.Region().Peers[i+1:]...)
+				break
+			}
+		}
+		meta.WriteRegionState(kvWB, d.Region(), raft_serverpb.PeerState_Normal)
+		// y.Assert(cc.NodeId == req.Peer.GetId())
+		d.removePeerCache(cc.NodeId)
+	}
+	confState := d.RaftGroup.ApplyConfChange(*cc)
+	log.Infof("[wq] %s applyconfchange %s, nodes = %v", d.Tag, cc.ChangeType.String(), confState.Nodes)
+	_ = confState // useless
+	resp := &raft_cmdpb.RaftCmdResponse{
+		Header: &raft_cmdpb.RaftResponseHeader{},
+		AdminResponse: &raft_cmdpb.AdminResponse{
+			CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
+			ChangePeer: &raft_cmdpb.ChangePeerResponse{},
+		},
+	}
+	d.processCallback(entry, resp, nil)
+}
+
+func (d *peerMsgHandler) processSplit(msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) error {
+	splitReq := msg.GetAdminRequest().GetSplit()
+	if err := checkKeyAndEpoch(splitReq.SplitKey, msg, d.Region()); err != nil {
+		return err
+	}
+
+	y.Assert(len(splitReq.GetNewPeerIds()) == len(d.Region().GetPeers()))
+	newPeers := make([]*metapb.Peer, len(d.Region().GetPeers()))
+	for i, peer := range d.Region().GetPeers() {
+		newPeers[i] = &metapb.Peer{
+			Id:      splitReq.NewPeerIds[i],
+			StoreId: peer.StoreId,
+		}
+	}
+	newRegion := &metapb.Region{
+		Id:       splitReq.NewRegionId,
+		StartKey: splitReq.SplitKey,
+		EndKey:   d.Region().EndKey,
+		RegionEpoch: &metapb.RegionEpoch{
+			ConfVer: 1,
+			Version: 1,
+		},
+		Peers: newPeers,
+	}
+	newPeer, err := createPeer(d.storeID(), d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newRegion)
+	y.Assert(err == nil)
+
+	sm := d.ctx.storeMeta
+	sm.Lock()
+	d.Region().RegionEpoch.Version += 1
+	d.Region().EndKey = splitReq.SplitKey
+	sm.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+	sm.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
+	sm.regions[splitReq.NewRegionId] = newRegion
+	sm.Unlock()
+
+	meta.WriteRegionState(wb, d.Region(), rspb.PeerState_Normal)
+	meta.WriteRegionState(wb, newRegion, rspb.PeerState_Normal)
+
+	d.ctx.router.register(newPeer)
+	err = d.ctx.router.send(newRegion.Id, message.NewMsg(message.MsgTypeStart, nil))
+	y.Assert(err == nil)
+
+	return nil
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -284,37 +348,66 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	}
 	// log.Infof("[wq] [Tag %s] [leader: %v, Vote: %v Term: %v] propose raft command %v",
 	// 	d.Tag, d.RaftGroup.Raft.Lead, d.RaftGroup.Raft.Vote, d.RaftGroup.Raft.Term, d.nextProposalIndex())
-	if msg.AdminRequest != nil && msg.AdminRequest.ChangePeer != nil {
-		if msg.AdminRequest.ChangePeer.ChangeType == eraftpb.ConfChangeType_RemoveNode &&
-			d.RaftGroup.Raft.Lead == msg.AdminRequest.ChangePeer.Peer.Id {
-			y.Assert(d.RaftGroup.Raft.Lead == d.RaftGroup.Raft.GetId()) // 自己应该是leader
-			// 直接拒绝, 转移leader, 可以一定程度上避免bug https://asktug.com/t/topic/274196
-			for peerId := range d.RaftGroup.Raft.Prs {
-				if peerId != d.RaftGroup.Raft.GetId() {
-					d.RaftGroup.TransferLeader(peerId)
-					break
-				}
+	if msg.AdminRequest != nil {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog, raft_cmdpb.AdminCmdType_TransferLeader:
+			data, err := msg.Marshal()
+			y.Assert(err == nil)
+			p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+			d.proposals = append(d.proposals, p)
+			if err = d.RaftGroup.Propose(data); err != nil {
+				log.Infof("[wq] propose err: %s, msg: %s", err.Error(), msg.String()) // maybe drop propose, because transferring or has been not leader
+				// cb.Done(ErrResp(err)) don't reply error to transfer req
+				return
 			}
-			cb.Done(&raft_cmdpb.RaftCmdResponse{
-				Header: &raft_cmdpb.RaftResponseHeader{},
-				AdminResponse: &raft_cmdpb.AdminResponse{
-					CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
-					ChangePeer: &raft_cmdpb.ChangePeerResponse{},
-				},
-			})
-			return
+		case raft_cmdpb.AdminCmdType_ChangePeer:
+			if msg.AdminRequest.ChangePeer.ChangeType == eraftpb.ConfChangeType_RemoveNode &&
+				d.RaftGroup.Raft.Lead == msg.AdminRequest.ChangePeer.Peer.Id {
+				y.Assert(d.RaftGroup.Raft.Lead == d.RaftGroup.Raft.GetId()) // 自己应该是leader
+				// 直接拒绝, 转移leader, 可以一定程度上避免bug https://asktug.com/t/topic/274196
+				for peerId := range d.RaftGroup.Raft.Prs {
+					if peerId != d.RaftGroup.Raft.GetId() {
+						d.RaftGroup.TransferLeader(peerId)
+						break
+					}
+				}
+				cb.Done(&raft_cmdpb.RaftCmdResponse{
+					Header: &raft_cmdpb.RaftResponseHeader{},
+					AdminResponse: &raft_cmdpb.AdminResponse{
+						CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
+						ChangePeer: &raft_cmdpb.ChangePeerResponse{},
+					},
+				})
+				return
+			}
+			ctx, err := msg.AdminRequest.ChangePeer.Marshal()
+			y.Assert(err == nil)
+			cc := eraftpb.ConfChange{
+				ChangeType: msg.AdminRequest.ChangePeer.ChangeType,
+				NodeId:     msg.AdminRequest.ChangePeer.Peer.Id,
+				Context:    ctx}
+			p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+			d.proposals = append(d.proposals, p)
+			err = d.RaftGroup.ProposeConfChange(cc)
+			y.Assert(err == nil)
+			log.Infof("[wq] propose ChangePeer %s,  %d", eraftpb.ConfChangeType_name[int32(cc.ChangeType)], cc.NodeId)
+			return // confchange 比较特殊(由于raftnode有单独定义的接口)
+		case raft_cmdpb.AdminCmdType_Split:
+			if err = checkKeyAndEpoch(msg.AdminRequest.Split.SplitKey, msg, d.Region()); err != nil {
+				return
+			}
+			data, err := msg.Marshal()
+			y.Assert(err == nil)
+			y.Assert(cb == nil) // don't need callback
+			// p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+			// d.proposals = append(d.proposals, p)
+			if err = d.RaftGroup.Propose(data); err != nil {
+				log.Infof("[wq] propose err: %s, msg: %s", err.Error(), msg.String()) // maybe drop propose, because transferring or has been not leader
+				return
+			}
+		default:
+			log.Panicf("[wq] not implement %s", msg.AdminRequest.CmdType.String())
 		}
-		ctx, err := msg.AdminRequest.ChangePeer.Marshal()
-		y.Assert(err == nil)
-		cc := eraftpb.ConfChange{
-			ChangeType: msg.AdminRequest.ChangePeer.ChangeType,
-			NodeId:     msg.AdminRequest.ChangePeer.Peer.Id,
-			Context:    ctx}
-		p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
-		d.proposals = append(d.proposals, p)
-		err = d.RaftGroup.ProposeConfChange(cc)
-		y.Assert(err == nil)
-		log.Infof("[wq] propose ChangePeer %s,  %d", eraftpb.ConfChangeType_name[int32(cc.ChangeType)], cc.NodeId)
 	} else {
 		data, err := msg.Marshal()
 		if err != nil {
@@ -822,4 +915,26 @@ func (d *peerMsgHandler) processCallback(entry *eraftpb.Entry, resp *raft_cmdpb.
 		}
 		d.proposals = d.proposals[1:]
 	}
+}
+
+func getRequestKey(req *raft_cmdpb.Request) []byte {
+	switch req.CmdType {
+	case raft_cmdpb.CmdType_Get:
+		return req.Get.Key
+	case raft_cmdpb.CmdType_Put:
+		return req.Put.Key
+	case raft_cmdpb.CmdType_Delete:
+		return req.Delete.Key
+	}
+	return nil
+}
+
+func checkKeyAndEpoch(key []byte, req *raft_cmdpb.RaftCmdRequest, region *metapb.Region) error {
+	if key != nil {
+		err := util.CheckKeyInRegion(key, region)
+		if err != nil {
+			return err
+		}
+	}
+	return util.CheckRegionEpoch(req, region, true)
 }
