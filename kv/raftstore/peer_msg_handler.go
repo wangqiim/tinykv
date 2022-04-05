@@ -133,7 +133,7 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBa
 			d.removePeerCache(cc.NodeId)
 		}
 		confState := d.RaftGroup.ApplyConfChange(*cc)
-		log.Infof("[wq] %s applyconfchange %s, len(node) = %d", d.Tag, cc.ChangeType.String(), len(confState.Nodes))
+		log.Infof("[wq] %s applyconfchange %s, nodes = %v", d.Tag, cc.ChangeType.String(), confState.Nodes)
 		_ = confState // useless
 		resp := &raft_cmdpb.RaftCmdResponse{
 			Header: &raft_cmdpb.RaftResponseHeader{},
@@ -808,7 +808,7 @@ func (d *peerMsgHandler) processCallback(entry *eraftpb.Entry, resp *raft_cmdpb.
 		if p.index < entry.Index {
 			log.Panicf("[wq] applying entry.index: %x greater than proposals[0].index: %x", entry.Index, p.index)
 		} else if p.index > entry.Index {
-			log.Infof("[wq] applying entry.index: %x smaller than proposals[0].index: %x", entry.Index, p.index)
+			// log.Infof("[wq] applying entry.index: %x smaller than proposals[0].index: %x", entry.Index, p.index)
 			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
 		} else {
 			if entry.Term != p.term {

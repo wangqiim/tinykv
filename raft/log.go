@@ -16,7 +16,8 @@ package raft
 
 import (
 	"fmt"
-	"log"
+
+	"github.com/pingcap-incubator/tinykv/log"
 
 	"github.com/Connor1996/badger/y"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
@@ -110,15 +111,14 @@ func (l *RaftLog) String() string {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
-	firtIndexInStorage, err := l.storage.FirstIndex()
+	firstIndexInStorage, err := l.storage.FirstIndex()
 	y.Assert(err == nil)
 	if len(l.entries) > 0 {
 		firstIndex := l.entries[0].Index
-		if firtIndexInStorage > firstIndex {
-			l.entries = l.entries[firtIndexInStorage-firstIndex:]
-			l.offset = firtIndexInStorage - 1
-			l.offsetTerm, err = l.storage.Term(firtIndexInStorage) // 即使storage里是空的，也会保留一个{index, term}在0位置应该是
-			y.Assert(err == nil)
+		if firstIndexInStorage > firstIndex {
+			l.offset = firstIndexInStorage - 1
+			l.offsetTerm = l.entries[firstIndexInStorage-firstIndex-1].Term
+			l.entries = l.entries[firstIndexInStorage-firstIndex:]
 		}
 	}
 }
@@ -126,6 +126,7 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A)
+	raft_assert(int(l.stabled-l.offset) <= len(l.entries))
 	if l.stabled-l.offset >= uint64(len(l.entries)) {
 		return []pb.Entry{}
 	}

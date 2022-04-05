@@ -382,9 +382,9 @@ func (r *Raft) maybeUpdateCommit() bool {
 		sort.Slice(matchs, func(i, j int) bool { return matchs[i] > matchs[j] })
 	}
 	majorityMatch := matchs[len(matchs)/2]
-	term, err := r.RaftLog.Term(majorityMatch) // panic过
-
-	raft_assert(err == nil)
+	// 这里考虑情况: 1,2,3,4,5中，1,2,3达成共识，再remove 3，则会出现1(leader)中假majority < commit_index的情况，则此时err是compacterr也是合理的
+	term, err := r.RaftLog.Term(majorityMatch)
+	raft_assert(err == nil || err == ErrCompacted)
 	if majorityMatch > r.RaftLog.committed && term == r.Term {
 		// raft paper: Figure 8 : only commit current log
 		r.RaftLog.committed = majorityMatch

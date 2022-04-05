@@ -409,8 +409,8 @@ func (r *Raft) Step(m pb.Message) (err error) {
 			r.Vote = m.From
 			r.Lead = None // 面向测试样例编程，当收到心跳或者append才更新r.Lead
 		} else {
-			log.Infof("%x [vote: %x] rejected %s from %x at term %d",
-				r.id, r.Vote, m.MsgType, m.From, r.Term)
+			log.Infof("%x [term: %d, vote: %x] rejected %s from %x at term %d",
+				r.id, r.Term, r.Vote, m.MsgType, m.From, r.Term)
 			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: voteRespMsgType(m.MsgType), Reject: true})
 		}
 	default:
@@ -515,5 +515,7 @@ func (r *Raft) removeNode(id uint64) {
 	}
 	delete(r.Prs, id)
 	// pending commands can become committed when a config change reduces the quorum requirements.
-	r.maybeUpdateCommit()
+	if r.State == StateLeader {
+		r.maybeUpdateCommit()
+	}
 }
